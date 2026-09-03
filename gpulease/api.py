@@ -1,0 +1,284 @@
+"""Student-facing control plane.
+
+Four endpoints, one payload shape. Every policy decision (quota, lease length,
+which assignment is active) lives here rather than in the CLI, so the rules can
+change mid-semester without asking anyone to upgrade.
+
+    uvicorn gpulease.api:app --host 0.0.0.0 --port 8000
+
+Run it with a single worker: the reaper is a thread inside this process.
+"""
+
+import logging
+import uuid
+from contextlib import asynccontextmanager
+
+from botocore.exceptions import ClientError
+from fastapi import Depends, FastAPI, Header, HTTPException
+
+from . import aws, config, db, keys, reaper
+
+log = logging.getLogger("gpulease.api")
+
+# Bumped to 2 for multi-node. A v1 CLI reads only `host` and would show a
+# student one of their two nodes with no hint that the other exists, on an
+# assignment whose whole point is the second one. That is the "genuinely
+# unavoidable" case the version gate is for.
+MIN_CLI_VERSION = 2
+
+
+@asynccontextmanager
+async def lifespan(app):
+    db.init()
+    if config.REAPER_ENABLED:
+        reaper.start_thread()
+    yield
+
+
+app = FastAPI(title="gpu-lease", lifespan=lifespan)
+
+
+def caller(authorization: str = Header(default=""), x_cli_version: int = Header(default=0)):
+    if x_cli_version and x_cli_version < MIN_CLI_VERSION:
+        raise HTTPException(426, "Your CLI is out of date. Reinstall it and try again.")
+    token = authorization[7:] if authorization.lower().startswith("bearer ") else ""
+    student = db.authenticate(token)
+    if not student:
+        raise HTTPException(401, "Bad or missing token. Run: gpulease login")
+    return student
+
+
+def session_view(row, group_id):
+    """The single payload the CLI polls. Everything a student needs to know."""
+    quota = config.GPU_HOUR_QUOTA
+    if row is None:
+        return {
+            "group_id": group_id,
+            "assignment_id": config.ACTIVE_ASSIGNMENT,
+            "state": db.STOPPED,
+            "gpu_hours_used": 0.0,
+            "gpu_hours_quota": quota,
+            "gpu_hours_remaining": quota,
+            "starts_used": 0,
+            "starts_allowed": config.MAX_STARTS,
+            "node_count": config.NODES_PER_GROUP,
+            "deadline": config.DEADLINE or None,
+        }
+    used = (row["gpu_seconds_used"] or 0) / 3600.0
+    view = {
+        "group_id": row["group_id"],
+        "assignment_id": row["assignment_id"],
+        "state": row["status"],
+        "gpu_hours_used": round(used, 2),
+        "gpu_hours_quota": quota,
+        "gpu_hours_remaining": round(max(0.0, quota - used), 2),
+        "starts_used": row["starts_used"],
+        "starts_allowed": config.MAX_STARTS,
+        # From the row, not config: a group mid-session keeps the cluster it
+        # was actually given even if the setting changes under them.
+        "node_count": db.node_count(row),
+        "deadline": config.DEADLINE or None,
+    }
+    if row["status"] in db.LIVE:
+        view["expires_at"] = row["expires_at"]
+        view["started_at"] = row["started_at"]
+        view["session_id"] = row["session_id"]
+    return view
+
+
+@app.get("/healthz")
+def healthz():
+    return {
+        "ok": True,
+        "course": config.COURSE,
+        "assignment": config.ACTIVE_ASSIGNMENT,
+        "nodes_per_group": config.NODES_PER_GROUP,
+        "deadline": config.deadline_str(),
+    }
+
+
+@app.get("/whoami")
+def whoami(student=Depends(caller)):
+    return {
+        "student_id": student["student_id"],
+        "name": student["name"],
+        "group_id": student["group_id"],
+        "active_assignment": config.ACTIVE_ASSIGNMENT,
+        "deadline": config.DEADLINE or None,
+    }
+
+
+def live_view(row, group_id):
+    """`session_view` plus whatever EC2 currently says, and the promotion from
+    PROVISIONING to RUNNING once sshd answers. This is where a session actually
+    becomes usable, so both /session and /session/start go through it."""
+    view = session_view(row, group_id)
+    nodes = db.session_nodes(row)
+    if row is None or view["state"] not in db.LIVE or not nodes:
+        return view
+
+    gid, aid = row["group_id"], row["assignment_id"]
+    described = aws.describe_many([n["instance_id"] for n in nodes])
+    if not described:
+        return view  # the reaper will sort this out
+
+    # Public addresses change across a stop/start, so EC2 wins over the row.
+    # Private addresses do not, but a node EC2 has lost keeps the one we
+    # recorded rather than becoming None and breaking the peer list.
+    fresh, states = [], []
+    for node in nodes:
+        inst = described.get(node["instance_id"])
+        states.append(inst["State"]["Name"] if inst else "missing")
+        fresh.append({
+            "rank": node.get("rank", 0),
+            "instance_id": node["instance_id"],
+            "private_ip": (aws.private_ip(inst) if inst else None) or node.get("private_ip"),
+            "host": (aws.public_host(inst) if inst else None) or node.get("host"),
+        })
+
+    view["instance_state"] = states[0]
+    view["instance_states"] = states
+
+    # Readiness is sshd answering, and it has to be sshd on EVERY node: a
+    # cluster whose second node is not up yet cannot run the job the student is
+    # about to be told to run. `all` short-circuits, so the usual case costs one
+    # probe, not one per node.
+    ready = view["state"] == db.PROVISIONING and all(aws.ssh_ready(n["host"]) for n in fresh)
+    if ready:
+        db.set_running(gid, aid, fresh)
+        view["state"] = db.RUNNING
+    elif fresh != nodes:
+        db.set_nodes(gid, aid, fresh)  # keep the addresses current for the reaper
+
+    view["nodes"] = [dict(n, state=st) for n, st in zip(fresh, states)]
+    if view["state"] == db.RUNNING:
+        view["user"] = "ubuntu"
+        view["host"] = fresh[0]["host"]
+        # Rank 0's *private* address: the nodes rendezvous inside the VPC, and
+        # handing students the public one would send an all-reduce out through
+        # the internet gateway and back.
+        view["master_addr"] = fresh[0]["private_ip"]
+        view["master_port"] = config.MASTER_PORT
+        if row["private_key"]:
+            view["private_key"] = row["private_key"]
+    return view
+
+
+@app.get("/session")
+def get_session(student=Depends(caller)):
+    gid, aid = student["group_id"], config.ACTIVE_ASSIGNMENT
+    return live_view(db.get_session(gid, aid), gid)
+
+
+@app.post("/session/start", status_code=202)
+def start(student=Depends(caller)):
+    gid, aid = student["group_id"], config.ACTIVE_ASSIGNMENT
+    session_id = str(uuid.uuid4())
+    now = db.now()
+
+    if config.DEADLINE and now >= config.DEADLINE:
+        raise HTTPException(
+            403,
+            f"The deadline for {aid} passed on {config.deadline_str()}. "
+            f"No new sessions can be started.",
+        )
+
+    # A lease may not outlive the deadline. Without this a group starting an
+    # hour before the cutoff would hold an instance well past it, and the
+    # deadline sweep below would be the only thing to catch them.
+    expires = now + config.MAX_SESSION_SECONDS
+    if config.DEADLINE:
+        expires = min(expires, config.DEADLINE)
+
+    nodes = config.NODES_PER_GROUP
+    ok, reason, existing = db.claim(
+        gid, aid, session_id, student["student_id"], expires,
+        config.QUOTA_SECONDS, config.MAX_STARTS, nodes,
+    )
+    if not ok:
+        if reason == "spent":
+            used = existing["starts_used"]
+            raise HTTPException(
+                429,
+                f"Group {gid} has already used "
+                f"{'its one session' if config.MAX_STARTS == 1 else f'all {used} of its sessions'}"
+                f" for {aid}. A session cannot be restarted once it ends, so this is "
+                f"the end of the line for this assignment. Email the instructor if "
+                f"something went wrong.",
+            )
+        if reason == "quota":
+            raise HTTPException(
+                429,
+                f"Group {gid} has used its {config.GPU_HOUR_QUOTA} GPU-hour budget for "
+                f"{aid}. Email the instructor if you need more.",
+            )
+        # Lost the race with a groupmate: hand back the session they started,
+        # complete with the host and key, so the CLI can print an ssh line
+        # instead of pretending it is launching something.
+        return live_view(existing, gid)
+
+    try:
+        private_key, public_key = keys.new_keypair(f"gpulease-{gid}-{session_id[:8]}")
+        db.set_key(gid, aid, private_key)
+        placed = aws.launch_or_resume(gid, aid, session_id, public_key, expires, nodes)
+        db.set_nodes(gid, aid, placed)
+    # A launch that never produced a usable instance must not cost the group a
+    # start: FAILED is startable, and under MAX_STARTS=1 forgetting the refund
+    # would mean one capacity blip ends their assignment.
+    except aws.RetryLater as e:
+        db.set_failed(gid, aid, e)
+        db.refund_start(gid, aid)
+        raise HTTPException(503, str(e))
+    except ClientError as e:
+        db.set_failed(gid, aid, e)
+        db.refund_start(gid, aid)
+        err = e.response.get("Error", {})
+        code, message = err.get("Code", "Unknown"), err.get("Message", "")
+        # The Code alone is close to useless for the generic ones -- an
+        # InvalidParameterValue that does not say WHICH parameter costs a round
+        # trip through journalctl to diagnose. The Message names it, so log it
+        # on its own line and hand it back: this is an instructor-operated
+        # service, and the person reading the error is the person who can fix
+        # the config.
+        log.error("launch failed for group %s: %s: %s", gid, code, message)
+        log.exception("launch failed for group %s", gid)
+        raise HTTPException(500, f"Launch failed: {code}: {message}"[:400])
+    except Exception as e:  # noqa: BLE001 - never strand the row in PROVISIONING
+        db.set_failed(gid, aid, e)
+        db.refund_start(gid, aid)
+        log.exception("launch failed for group %s", gid)
+        raise HTTPException(500, "Launch failed. Tell the instructor.")
+
+    return session_view(db.get_session(gid, aid), gid)
+
+
+@app.post("/session/stop")
+def stop(student=Depends(caller)):
+    gid, aid = student["group_id"], config.ACTIVE_ASSIGNMENT
+    row = db.get_session(gid, aid)
+    if not row or row["status"] not in db.LIVE:
+        return {
+            "stopped": False,
+            "message": "Nothing was running.",
+            **session_view(row, gid),
+        }
+
+    instance_ids = db.node_instance_ids(row)
+    duration = db.accrue_and_close(gid, aid, f"stopped by {student['student_id']}")
+    aws.stop_instances(instance_ids, "student requested")
+    db.mark_stopped(gid, aid)
+
+    count = len(instance_ids)
+    return {
+        "stopped": True,
+        "session_duration_seconds": duration,
+        "message": (
+            f"{count} instance{'s' if count != 1 else ''} stopping. "
+            f"Your files on the root volume{'s' if count != 1 else ''} are preserved."
+            if count
+            # A live session with nothing recorded against it: the reaper lost
+            # the race, or the launch died between claiming and set_nodes.
+            else "Session closed. No instances were recorded against it."
+        ),
+        **session_view(db.get_session(gid, aid), gid),
+    }

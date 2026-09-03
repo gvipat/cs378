@@ -1,0 +1,27 @@
+# TLS for the gpu-lease API. Copy to /etc/caddy/Caddyfile and edit the name.
+#
+#     sudo cp Caddyfile.example /etc/caddy/Caddyfile
+#     sudo nano /etc/caddy/Caddyfile     # put your own DNS name at the top
+#     sudo systemctl reload caddy
+#
+# Caddy gets a certificate from Let's Encrypt on first start, renews it on its
+# own, and redirects http -> https. Nothing in gpulease knows this is here: the
+# service binds to localhost and Caddy is the only thing that talks to it.
+#
+# Two things this needs that are easy to miss:
+#
+#   - A real DNS name, pointed at the lease host's Elastic IP. It cannot be the
+#     EC2 public hostname: Let's Encrypt refuses to issue for
+#     *.compute.amazonaws.com, so `ec2-1-2-3-4...` will fail the challenge. A
+#     department subdomain or a cheap domain both work.
+#   - Ports 80 and 443 open to your students on the host's security group. 80
+#     is not optional - it carries the ACME challenge and the redirect.
+#
+# Once this is up, port 8000 should NOT be reachable from outside the host.
+# Keep GPULEASE_HOST=127.0.0.1 in gpulease.env and drop the old 8000 rule from
+# the security group; a plaintext port still listening beside the TLS one is
+# the whole problem, unmoved.
+
+cs378.example.edu {
+	reverse_proxy 127.0.0.1:8000
+}
