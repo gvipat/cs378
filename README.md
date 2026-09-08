@@ -449,9 +449,11 @@ assignment for them unless you top them up. Three consequences:
   path is what ends it. Nothing accrues mid-session, so `admin.py sessions` and
   `gpulease status` compute the live figure for display and the group is
   actually billed when the session stops.
-- **`GPULEASE_MIN_START_MINUTES` is a floor.** Below it the start is refused
-  rather than handing out a cluster that expires before it has booted, because
-  booting itself costs budget.
+- **`GPULEASE_MIN_START_MINUTES` is a floor under the lease**, not under the
+  budget. A start is refused when the lease it would buy — remaining
+  node-hours divided by the node count — falls below it, rather than handing
+  out a cluster that expires before it has booted, because booting itself
+  costs budget. At two nodes a group needs twice this many node-minutes left.
 
 ```bash
 ./admin.py sessions                   # GPU-HRS includes the live session
@@ -564,7 +566,7 @@ not the same thing.
 | `GPULEASE_MAX_STARTS` | `0` (unlimited) | Cap on the number of sessions a group gets per assignment, on top of the hour budget. Unlimited is the sane setting — sessions are disposable, so a lost one is not a catastrophe. `1` restores the old one-lease-per-group policy. |
 | `GPULEASE_MAX_SESSION_HOURS` | `8` | The bound on any single session. `0` removes the cap, leaving the hour budget as the only bound — a session then runs until the group's quota is spent. |
 | `GPULEASE_GPU_HOUR_QUOTA` | `30` | **The ration.** Cumulative **node**-hours per group per assignment. Charged when a session stops, checked when one starts — and a start's lease is capped at whatever is left, so the reaper's ordinary expiry is what ends a session that runs it out. The example ships `60`. |
-| `GPULEASE_MIN_START_MINUTES` | `15` | The smallest lease worth handing out. A group with less budget than this is refused rather than given a cluster that expires before it finishes booting. |
+| `GPULEASE_MIN_START_MINUTES` | `15` | The smallest lease worth handing out. A group whose remaining budget buys a shorter lease than this — node-hours left ÷ `NODES_PER_GROUP` — is refused rather than given a cluster that expires before it finishes booting. |
 | `GPULEASE_NODES_PER_GROUP` | `2` | Instances per group per session, max 8. Multiplies the bill directly. |
 | `GPULEASE_GPUS_PER_NODE` | `1` | GPUs exposed per node via `CUDA_VISIBLE_DEVICES`, and the `slots=` count in the mpirun hostfile. The older name `GPULEASE_GPUS_PER_GROUP` still works. |
 | `GPULEASE_MASTER_PORT` | `29500` | Exported to the nodes as `MASTER_PORT`. torch.distributed's default. |

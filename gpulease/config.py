@@ -142,6 +142,10 @@ GPU_HOUR_QUOTA = _float("GPULEASE_GPU_HOUR_QUOTA", 30)
 # The smallest lease worth handing out. Booting a node burns several minutes of
 # budget before a student can do anything with it, so a group with two minutes
 # left is better told they are out than given a two-minute cluster.
+#
+# A lease length, not a budget: claim() checks it against remaining // nodes,
+# so at two nodes a group needs twice this many node-minutes to be allowed to
+# start. That is the same figure api.start quotes when it refuses them.
 MIN_START_MINUTES = _float("GPULEASE_MIN_START_MINUTES", 15)
 
 # How many times a group may start a session for one assignment. 0, the

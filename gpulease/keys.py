@@ -9,12 +9,21 @@ the service carries no crypto dependency.
 """
 
 import pathlib
+import re
 import subprocess
 import tempfile
+
+# The comment ends up inside the public-key line, which userdata.render checks
+# against a strict regex before embedding it in shell and in YAML. The caller
+# builds it out of a group id that came from the instructor's roster CSV, so a
+# group called "Team Avila" or "team/a" would otherwise produce a key that is
+# refused at render time and fail every launch for that group.
+_COMMENT_BAD = re.compile(r"[^\w.@-]")
 
 
 def new_keypair(comment: str = "gpulease") -> tuple[str, str]:
     """Return (private_key_pem, public_key_line)."""
+    comment = _COMMENT_BAD.sub("-", comment) or "gpulease"
     with tempfile.TemporaryDirectory() as tmp:
         path = pathlib.Path(tmp) / "k"
         subprocess.run(
