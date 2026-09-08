@@ -40,10 +40,10 @@ students ──HTTP+token──▶  lease host  ──boto3──▶  group 7: n
 Pick your values once; the commands below use them:
 
 ```bash
-COURSE=cs378
+COURSE=utcs378
 REGION=us-west-2
-KEYPAIR=gpulease         # NAME of an EC2 key pair, not a path to a .pem
-KEYFILE=~/gpulease.pem   # the matching private key on this machine
+KEYPAIR=gpu-lease         # NAME of an EC2 key pair, not a path to a .pem
+KEYFILE=~/.ssh/gpu-lease.pem   # the matching private key on this machine
 ```
 
 Everything below builds on these, and step 2 adds `$HOST_ID`, `$HOST_IP` and
@@ -70,10 +70,16 @@ HOST_SG=$(aws ec2 describe-security-groups --region $REGION \
 aws ec2 describe-key-pairs --region $REGION --query 'KeyPairs[].KeyName' --output text
 
 # only if you need a new one:
-aws ec2 create-key-pair --region $REGION --key-name $KEYPAIR \
-  --query KeyMaterial --output text > ~/$KEYPAIR.pem
-chmod 400 ~/$KEYPAIR.pem
+mkdir -p ~/.ssh
+(umask 077; aws ec2 create-key-pair --region $REGION --key-name $KEYPAIR \
+   --query KeyMaterial --output text > $KEYFILE)
 ```
+
+Write it to `$KEYFILE` rather than to a path you pick here, or the rest of this
+guide's `ssh -i $KEYFILE` lines point at a file that does not exist. The `umask`
+is not decoration either: a plain redirect creates the file world-readable and
+only narrows it afterwards, and on a shared machine that window is enough to
+lose the key. This leaves it `0600`, which is what `ssh` wants.
 
 This key is yours and only lets you into the lease host. gpulease never reads
 or manages it. **Student access uses a completely separate mechanism** — see
