@@ -346,9 +346,11 @@ bills in full and cannot finish the job.
 ./admin.py sessions          # what the database believes, and what it has cost
 ./admin.py instances         # what EC2 actually has
 ./admin.py reap              # run one reconciliation pass by hand
-./admin.py kill --group 7
+./admin.py kill --group 7    # stop instances now; disks survive
 ./admin.py disable abc123    # revoke one token; `enable` puts it back
-./admin.py grant 7           # give group 7 another start
+./admin.py budget 7 --hours 0  # give group 7 their hour budget back
+./admin.py grant 7           # give group 7 another start (when starts are limited)
+./admin.py terminate         # destroy instances AND disks; irreversible
 ./admin.py preflight         # check the host's AWS permissions
 
 curl -s localhost:8000/healthz      # course, assignment, node count, deadline
@@ -356,37 +358,53 @@ journalctl -u gpulease -f
 sudo systemctl restart gpulease     # after editing gpulease.env
 ```
 
-Between assignments, bump `GPULEASE_ACTIVE_ASSIGNMENT` and restart. Quotas and
-the start limit are both per `(group, assignment)`, so everyone starts fresh.
-No CLI change.
+Between assignments, bump `GPULEASE_ACTIVE_ASSIGNMENT` and restart. The hour
+budget and the start limit are both per `(group, assignment)`, so everyone
+starts fresh. No CLI change.
 
-### One session per group
+### Rationing: hours or sessions
 
-`GPULEASE_MAX_STARTS=1` (the default) gives each group a single lease per
-assignment. Once it ends they cannot start again, and `gpulease start` returns
-a 429 explaining why. Set it to `0` for unlimited restarts bounded only by the
-GPU-hour quota.
+There are two ways to ration, and they are the same two settings.
 
-Three things follow from this that are worth deciding on before the semester,
-not during it:
+**An hour budget** (what `gpulease.env.example` ships) is
+`GPULEASE_MAX_STARTS=0` with `GPULEASE_GPU_HOUR_QUOTA=60`: a group starts and
+stops as often as it likes and spends from a pool of 60 **node**-hours for the
+assignment. Node-hours, so a two-node session spends two per wall-clock hour and
+a group's 60 is 30 hours of a two-node cluster. Three consequences:
 
-- **Both ways a session ends count** — the student stopping it, and the lease
-  expiring at `GPULEASE_MAX_SESSION_HOURS`. There is no idle watchdog, so a
-  group that walks away keeps its instance until the lease runs out.
-- **A failed launch does not count.** If the instance never came up — capacity,
-  a bad AMI — the start is refunded and the group can retry. Their one lease is
-  for a session they actually got.
-- **You will be granting restarts**, so the tool exists:
+- **Stopping is how a group saves money**, so it is worth telling them that. A
+  group that walks away from a running cluster keeps paying for it until the
+  lease expires — there is no idle watchdog.
+- **A start's lease is capped at what is left.** A group with 40 node-minutes
+  gets a 20-minute two-node lease, and the reaper's ordinary "lease expired"
+  path is what ends it. Nothing accrues mid-session, so `admin.py sessions` and
+  `gpulease status` compute the live figure for display and the group is
+  actually billed when the session stops.
+- **`GPULEASE_MIN_START_MINUTES` is a floor.** Below it the start is refused
+  rather than handing out a cluster that expires before it has booted, because
+  booting itself costs budget.
+
+```bash
+./admin.py sessions                   # GPU-HRS includes the live session
+./admin.py budget 7 --hours 0         # give group 7 their whole budget back
+./admin.py budget 7 --hours 45        # or leave them 15 of 60
+```
+
+**One session per group** is `GPULEASE_MAX_STARTS=1`, the code default: a group
+gets a single lease of at most `GPULEASE_MAX_SESSION_HOURS`, and once it ends —
+whether they stopped it or it expired — `gpulease start` returns a 429. The hour
+budget is inert here, because a group that starts once is only checked once.
+Under this policy `gpulease stop` makes the student type `stop` to confirm
+(`-y` skips it), and you will be granting restarts:
 
 ```bash
 ./admin.py grant 7                    # one more start for group 7
 ./admin.py grant 7 --starts 2         # or more
-./admin.py sessions                   # STARTS column shows used/allowed
 ```
 
-Stopping is irreversible under this policy, so `gpulease stop` asks the student
-to type `stop` to confirm when it is their last session. `gpulease stop -y`
-skips the prompt.
+**A failed launch costs nothing either way.** If the instance never came up —
+capacity, a bad AMI — the start is refunded and no time is billed, because a
+session that never existed is not charged.
 
 Loading a roster never disables anyone who has dropped off it — a CSV edit
 silently revoking access is not a good default — so use `./admin.py disable`
@@ -461,26 +479,57 @@ not the same thing.
 | `GPULEASE_SUBNET_IDS` | blank → public subnets of the VPC | Tried in order on capacity errors. Must be in one VPC; spanning two is rejected at startup. Sets the VPC the security groups are created in. |
 | `GPULEASE_ALLOWED_SSH_CIDRS` | `0.0.0.0/0` | Reconciled, not merely added to — narrowing it closes the old range. The lease host adds its own address automatically for the readiness probe. |
 | `GPULEASE_ACTIVE_ASSIGNMENT` | `hw1` | Every limit is per `(group, assignment)`. Bump it between homeworks and everyone starts fresh. |
-| `GPULEASE_DEADLINE` | blank → none | See above. **The example ships a date filled in.** |
-| `GPULEASE_MAX_STARTS` | `1` | Starts a group gets per assignment. `0` = unlimited. |
-| `GPULEASE_MAX_SESSION_HOURS` | `8` | The only bound on a session, and so the only bound on the bill. |
-| `GPULEASE_GPU_HOUR_QUOTA` | `30` | Cumulative **node**-hours per group. Only checked at start, so inert when `MAX_STARTS=1`. |
+| `GPULEASE_DEADLINE` | blank → none | See above. **The example ships a date filled in**, which with `GPULEASE_TERMINATE_AT_DEADLINE=1` also ships a date on which volumes get destroyed. |
+| `GPULEASE_MAX_STARTS` | `1` | Starts a group gets per assignment. `0` = unlimited, which is what makes the hour budget below the actual ration. The example ships `0`. |
+| `GPULEASE_MAX_SESSION_HOURS` | `8` | The bound on any single session. |
+| `GPULEASE_GPU_HOUR_QUOTA` | `30` | The budget: cumulative **node**-hours per group per assignment. Charged when a session stops, checked when one starts — and a start's lease is capped at whatever is left, so the reaper's ordinary expiry is what enforces it. Inert when `MAX_STARTS=1`, since a group that starts once is checked once. The example ships `60`. |
+| `GPULEASE_MIN_START_MINUTES` | `15` | The smallest lease worth handing out. A group with less budget than this is refused rather than given a cluster that expires before it finishes booting. |
+| `GPULEASE_TERMINATE_AT_DEADLINE` | `0` | `1` lets the reaper **terminate** this course's instances once the deadline plus the grace below has passed, destroying the root volumes. Off in the code and **on in the example**, same reasoning as `t3.micro`: a missing config file should not destroy data. |
+| `GPULEASE_TERMINATE_GRACE_HOURS` | `24` | Hours between "everything stopped" and "the volumes are gone". Your window to catch a mistyped `GPULEASE_DEADLINE` — not the students', who cannot reach a stopped instance. |
 | `GPULEASE_NODES_PER_GROUP` | `2` | Instances per group per session, max 8. Multiplies the bill directly. |
 | `GPULEASE_GPUS_PER_NODE` | `1` | GPUs exposed per node via `CUDA_VISIBLE_DEVICES`, and the `slots=` count in the mpirun hostfile. The older name `GPULEASE_GPUS_PER_GROUP` still works. |
 | `GPULEASE_MASTER_PORT` | `29500` | Exported to the nodes as `MASTER_PORT`. torch.distributed's default. |
 | `GPULEASE_REAPER` | `1` | `0` disables the reconciliation thread. Only for local development — nothing else stops an expired lease. |
 | `GPULEASE_REAPER_INTERVAL` | `120` | Seconds between passes. Also the worst-case lag on an expiry. |
 
-`GPULEASE_API` is the one variable that is *not* server-side: students set it
-in their own shell to point the CLI at your lease host.
+Two variables are not settings *in* that file. `GPULEASE_ENV` chooses which
+file to read — `GPULEASE_ENV=gpulease.env.test ./admin.py sessions` — replacing
+`gpulease.env` rather than layering on top of it, so anything the chosen file
+omits falls back to the code defaults rather than to production's value. It
+affects only the fallback load; systemd passes `gpulease.env` as an
+`EnvironmentFile` regardless, and real environment variables always win.
+`GPULEASE_API` is the one variable that is genuinely client-side: students set
+it in their own shell to point the CLI at your lease host.
 
 ### Ending an assignment
 
-The service only ever *stops* instances, never terminates them — that is what
-keeps students' disks between sessions, and it is deliberately not a power the
-service's IAM role has. But a stopped instance still bills for its EBS volume
-indefinitely, so ending an assignment means terminating the fleet yourself,
-with your own credentials:
+For the whole life of an assignment the service only ever *stops* instances.
+That is what keeps students' disks between sessions, and nothing reachable from
+a student request can do otherwise. But a stopped instance still bills for its
+root volume — at 30 groups x 2 nodes x 100 GB that is roughly $480 a month for
+disks nobody will read again — so ending an assignment means terminating the
+fleet. Three ways, in order of preference:
+
+**Automatically, at the deadline.** With `GPULEASE_TERMINATE_AT_DEADLINE=1` the
+reaper terminates everything tagged for the course once `GPULEASE_DEADLINE` plus
+`GPULEASE_TERMINATE_GRACE_HOURS` has passed. The deadline itself only stops
+things; the grace period exists so a mistyped deadline is a day of stopped
+instances rather than an immediate loss of every group's work.
+
+**On demand, from the host:**
+
+```bash
+./admin.py terminate                 # the active assignment
+./admin.py terminate --group 7       # or one group
+./admin.py terminate --all-assignments
+```
+
+It lists what it will destroy, says how many are still running, and makes you
+type the course tag to confirm.
+
+**By hand, with your own credentials**, if you would rather the service never
+had `ec2:TerminateInstances` at all — remove the `TerminateAfterDeadline`
+statement from `iam-policy.json` and do this instead:
 
 ```bash
 ./admin.py kill                      # on the host: stop everything first
@@ -493,10 +542,12 @@ aws ec2 terminate-instances --region $REGION --instance-ids $(
     --query 'Reservations[].Instances[].InstanceId' --output text)
 ```
 
-Warn students first: the root volume is the only place their work lives, and
-this deletes it. Then bump `GPULEASE_ACTIVE_ASSIGNMENT` and restart; quotas are
-per `(group, assignment)`, so the next assignment starts everyone at zero and
-the old rows stay for reporting.
+Warn students before any of these: the root volume is the only place their work
+lives. `gpulease status` says so next to the deadline whenever termination is
+on, but it says it to whoever runs it, which is not the same as telling the
+class. Then bump `GPULEASE_ACTIVE_ASSIGNMENT` and restart; the budget is per
+`(group, assignment)`, so the next assignment starts everyone at zero and the
+old rows stay for reporting.
 
 ### Tearing it all down
 
@@ -624,9 +675,11 @@ route an all-reduce out through the internet gateway and back.
 running instance count against the session's `node_count`; a two-node session
 down to one gets stopped and closed with reason `partial cluster (1/2 nodes)`.
 The survivor bills at the full rate and cannot run the job on its own — a
-two-node all-reduce with one node hangs, it does not run slowly. Under
-`MAX_STARTS=1` that ends the group's assignment, so `./admin.py grant <group>`
-is the way back in.
+two-node all-reduce with one node hangs, it does not run slowly. The group is
+billed for the time it ran; under `MAX_STARTS=1` that also ends their
+assignment, so `./admin.py grant <group>` is the way back in, and
+`./admin.py budget <group> --hours N` refunds the hours if the failure was not
+theirs.
 
 **Two key systems, which is worth being explicit about.**
 
@@ -647,13 +700,18 @@ pile of them to clean up.
 **Keys are per session, not per group.** Stopping a session deletes the private
 key, so access is revoked without anyone rotating anything.
 
-**Instances are stopped, never terminated,** during an assignment. The root EBS
-volume is the only persistence students get.
+**Instances are stopped, never terminated, during an assignment.** The root EBS
+volume is the only persistence students get, and nothing reachable from a
+student request can destroy it. The one exception is after the deadline, and
+only with `GPULEASE_TERMINATE_AT_DEADLINE=1` — see "Ending an assignment".
 
 **The lease window is the only thing bounding a session.** There is no idle
-auto-stop: a group that starts an instance has it until they stop it or
-`GPULEASE_MAX_SESSION_HOURS` runs out, whether or not they are using it. That
-is a deliberate trade — see "What a session can cost you".
+auto-stop: a group that starts an instance has it until they stop it or the
+lease runs out, whether or not they are using it. That is a deliberate trade —
+see "What a session can cost you". The lease is
+`GPULEASE_MAX_SESSION_HOURS`, or less when the group's remaining hour budget
+is shorter, which is how `GPULEASE_GPU_HOUR_QUOTA` gets enforced without
+anything running on the instance.
 
 **IAM scoping is the invariant worth preserving.** Every start/stop/tag action
 is conditioned on `ec2:ResourceTag/Course`, and `RunInstances` on
@@ -690,6 +748,40 @@ settling a dispute about who ran what).
 
 There is no automated test suite. This is the checklist.
 
+Run it under `gpulease.env.test` rather than your real config. It is the same
+control plane — launch, readiness, peers over IMDS, the reaper, the budget,
+termination all work identically — on `t3.micro` instead of `g4dn.xlarge`, with
+minutes where production has hours, so the whole list costs cents. What it
+cannot cover is anything needing a GPU: stock Ubuntu has no driver, so the boot
+script's GPU count is 0.
+
+```bash
+export GPULEASE_ENV=gpulease.env.test   # replaces gpulease.env; does not merge
+python -m gpulease.db init              # setup.sh only ever inits the real one
+./admin.py roster test-roster.csv       # a couple of fake students, two groups
+.venv/bin/uvicorn gpulease.api:app --port 8001
+GPULEASE_API=http://127.0.0.1:8001 python3 cli/gpulease.py login <token>
+```
+
+Two things about it are deliberate and worth not undoing:
+
+- **It uses a different `GPULEASE_COURSE` (`cs378-test`).** That tag is the
+  blast radius for every describe, stop and terminate. Sharing it with the live
+  deployment would let a test run's `admin.py terminate`, or a deliberately
+  passed deadline, destroy real students' disks. The price is that the host's
+  IAM role must allow both tags — `StringEquals` takes a list:
+
+  ```bash
+  sed 's/"REPLACE_COURSE_TAG"/["cs378","cs378-test"]/' iam-policy.json \
+    > /tmp/gpulease-policy.json
+  ```
+
+  Skip that and `RunInstances` is denied under the test config, which
+  `./admin.py preflight` will tell you.
+- **`GPULEASE_GPU_HOUR_QUOTA=0.05`** — three node-minutes, a 90-second lease at
+  two nodes. That is exactly what item 6 checks, and it will cut every *other*
+  test short. Raise it to `0.5` while you work through the rest.
+
 1. **Preflight.** `./admin.py preflight` — every line `ok`.
 2. **Happy path.** `login`, `start`, ssh in, `stop`. You should get
    `GPULEASE_NODES_PER_GROUP` ssh lines, and none of them printed before that
@@ -699,31 +791,45 @@ There is no automated test suite. This is the checklist.
    be there — with a *different* key working, on every node.
 4. **Concurrent start.** Two group members run `start` at the same moment. One
    instance, both get the same session.
-5. **Start limit, then quota.** These are two different 429s and `claim()`
-   checks them in that order, so the quota is *unreachable* in the default
-   configuration — a group that has spent its one start is refused as `spent`
-   before the quota is ever consulted. Test the limit first: `stop` a session
-   and `start` again, expecting "already used its one session". Then set
-   `GPULEASE_MAX_STARTS=0` with `GPULEASE_GPU_HOUR_QUOTA=0.01`, restart, burn a
-   couple of minutes and `start` again for the quota one. Both should be clean
-   429s, not 500s.
-6. **Reaper.** `./admin.py kill --group N` behind the service's back, then
+5. **Start limit, then budget.** These are different 429s and `claim()` checks
+   them in that order, so the budget is *unreachable* while `MAX_STARTS=1` — a
+   group that has spent its one start is refused as `spent` before the budget is
+   ever consulted. Test the limit first: `stop` a session and `start` again,
+   expecting "already used its one session". Both must be clean 429s, not 500s.
+6. **The budget.** Set `GPULEASE_MAX_STARTS=0`, `GPULEASE_GPU_HOUR_QUOTA=0.05`
+   (3 node-minutes) and `GPULEASE_MIN_START_MINUTES=0`, restart, then check four
+   things:
+   - `start`, then `gpulease status`. With two nodes the lease should end in
+     about 90 seconds, annotated "all the gpu-hours you have left" — *not* in
+     `MAX_SESSION_HOURS`. That cap is the whole of budget enforcement, so if it
+     is wrong nothing else here matters.
+   - `./admin.py sessions` while it runs: GPU-HRS climbs at `NODES_PER_GROUP`
+     per wall-clock hour. It is computed for display; the row is only written
+     when the session stops.
+   - Leave it. Within a reaper interval it stops as `lease expired`, and
+     `./admin.py sessions` then shows about 2x the wall-clock time consumed.
+   - `start` again: a 429 naming hours used and left. Raise
+     `GPULEASE_MIN_START_MINUTES` above what remains and the message changes to
+     the "needs at least N minutes' worth" one.
+
+   Then `./admin.py budget <group> --hours 0` and confirm they can start again.
+7. **Reaper.** `./admin.py kill --group N` behind the service's back, then
    `./admin.py reap` twice. First pass reconciles, second is a no-op.
-7. **Orphan.** Launch an instance tagged `Course=$COURSE` by hand with no session
+8. **Orphan.** Launch an instance tagged `Course=$COURSE` by hand with no session
    row; `./admin.py reap` should stop it.
-8. **Lease expiry.** Set `GPULEASE_MAX_SESSION_HOURS=0.05`, restart, start a
+9. **Lease expiry.** Set `GPULEASE_MAX_SESSION_HOURS=0.05`, restart, start a
    session and leave it alone. Within a reaper interval the instance should be
    stopped and the session `STOPPED` with reason `lease expired`. This is now
    the *only* automatic stop, so it is worth actually testing rather than
    assuming.
-9. **Narrowing SSH.** Set `GPULEASE_ALLOWED_SSH_CIDRS` to your own `/32`,
+10. **Narrowing SSH.** Set `GPULEASE_ALLOWED_SSH_CIDRS` to your own `/32`,
    restart, and confirm in the console that `0.0.0.0/0` is *gone* from the
    `$COURSE-instances` group — and that `start` still reaches `RUNNING`
    (readiness is a port-22 probe from the lease host, so it needs its own way
    in; the service adds that automatically).
-10. **Revocation.** `./admin.py disable <student>`, then that student's
+11. **Revocation.** `./admin.py disable <student>`, then that student's
     `gpulease status` must fail with a 401.
-11. **Deadline.** Set `GPULEASE_DEADLINE` a minute or two ahead (with your UTC
+12. **Deadline.** Set `GPULEASE_DEADLINE` a minute or two ahead (with your UTC
     offset) and restart. Three things must hold: a session started before it
     has an `expires_at` capped at the deadline rather than a full
     `MAX_SESSION_HOURS` lease; `start` afterwards is a 403 naming the date; and
@@ -732,33 +838,53 @@ There is no automated test suite. This is the checklist.
     sweep works off EC2 rather than the database. Blank it out and restart
     before you carry on, or nothing else will start.
 
+If you are using `GPULEASE_TERMINATE_AT_DEADLINE`, test it too — on a scratch
+deployment, because it is the one thing here that destroys data:
+
+13. **Termination is off unless asked.** With the deadline still passed and
+    `GPULEASE_TERMINATE_AT_DEADLINE` unset, `./admin.py reap` must leave the
+    instances `stopped` and stop there. This is the code default, and the guard
+    on a config file that never mentioned termination.
+14. **Termination at the deadline.** Now set
+    `GPULEASE_TERMINATE_AT_DEADLINE=1` and `GPULEASE_TERMINATE_GRACE_HOURS=0`,
+    restart, and `./admin.py reap`. Everything tagged for the course goes to
+    `shutting-down` and `aws ec2 describe-volumes` shows the root volumes gone.
+    The case worth checking specifically is an instance that was already
+    **stopped**: the sweep re-describes to find those, and they are the volumes
+    the whole feature exists to reclaim. Run `reap` twice — the second pass must
+    find nothing, since terminated instances leave the states it looks at.
+15. **The warning reaches students.** With a deadline set and termination on,
+    `gpulease status` prints the "your nodes and their DISKS are deleted after
+    this" lines. Confirm it, then tell the class in a way that does not depend
+    on them running it.
+
 With `GPULEASE_NODES_PER_GROUP` above 1, also:
 
-12. **One subnet.** `./admin.py instances` — every node of a group shows the
+16. **One subnet.** `./admin.py instances` — every node of a group shows the
     same `NODE` ranks 0..n-1, and in the console they are in the same
     availability zone. If they are not, the single-`RunInstances` path was
     bypassed somewhere.
-13. **Peers on the box.** ssh to node0: `cat /etc/gpulease/peers` lists every
+17. **Peers on the box.** ssh to node0: `cat /etc/gpulease/peers` lists every
     node's private address, `ping node1` resolves, and
     `echo $MASTER_ADDR $NODE_RANK $NNODES` is populated. On node1, `NODE_RANK`
     is 1 and `MASTER_ADDR` is unchanged. If the peers file is missing, the
     instance did not get tags through IMDS — check `InstanceMetadataTags` and
     that the control plane's role has `ec2:ModifyInstanceMetadataOptions`.
-14. **They can actually talk.** From node0, `nc -vz node1 29500` after
+18. **They can actually talk.** From node0, `nc -vz node1 29500` after
     `nc -l 29500` on node1. This is the per-group security group doing its job;
     it is the thing that silently breaks if the cluster group is not attached.
-15. **Isolation.** From group A's node0, the same `nc` to a group B node must
+19. **Isolation.** From group A's node0, the same `nc` to a group B node must
     *fail*. If it succeeds, the groups are sharing a security group.
-16. **Agent hop.** `ssh -A` to node0, then `ssh node1` from there. Without
+20. **Agent hop.** `ssh -A` to node0, then `ssh node1` from there. Without
     `-A` it should fail — the private key is deliberately not on the instance.
-17. **Resume with a fresh key on both.** After test 3, confirm the *old* key is
+21. **Resume with a fresh key on both.** After test 3, confirm the *old* key is
     rejected by node1 as well as node0. `bootcmd` runs per node; a payload that
     only re-ran on one of them is exactly the failure this catches.
-18. **Partial cluster.** Stop one node of a live session behind the service's
+22. **Partial cluster.** Stop one node of a live session behind the service's
     back (`aws ec2 stop-instances`), then `./admin.py reap`. The other node
     must be stopped too and the session closed with reason
     `partial cluster (1/2 nodes)`. Run `reap` again: no-op.
-19. **Capacity.** Set `GPULEASE_NODES_PER_GROUP` to something the account
+23. **Capacity.** Set `GPULEASE_NODES_PER_GROUP` to something the account
     cannot place (or a scarce type) and `start` — a clean 503 telling the
     student to retry, the group's start refunded (`./admin.py sessions` shows
     `starts_used` unchanged), and no stray instances in `./admin.py instances`.
@@ -838,19 +964,22 @@ session: past it nothing starts and the reaper stops the fleet, so it puts a
 wall at the end of the assignment no matter how many leases were granted along
 the way. It does not reduce the sum above — it stops that sum from repeating.
 
-Two things that do *not* save you here:
+`GPULEASE_GPU_HOUR_QUOTA` bounds the total per group, and is the setting that
+turns the worst case above into a number you chose: `groups x QUOTA x $/hour`,
+since the quota is already counted in node-hours. It is only a live control with
+`GPULEASE_MAX_STARTS=0` — a group that may start once is only checked once.
 
-- `GPULEASE_GPU_HOUR_QUOTA` is only checked when a group **starts** a session.
-  With `GPULEASE_MAX_STARTS=1` a group starts once, so the quota never fires. It
-  is a live control only when you set `MAX_STARTS=0`.
-- Stopping is not terminating. Every stopped instance keeps billing for its EBS
-  volume until you terminate it at the end of the assignment — and there are
-  now `NODES_PER_GROUP` volumes and public IPv4 addresses per group, not one.
+One thing that does *not* save you: stopping is not terminating. Every stopped
+instance keeps billing for its EBS volume until it is terminated, and there are
+`NODES_PER_GROUP` volumes per group, not one. At 30 groups x 2 nodes x 100 GB
+that is roughly $480 a month for disks nobody is using. Set
+`GPULEASE_TERMINATE_AT_DEADLINE=1` or run `./admin.py terminate` when the
+assignment is over.
 
-So: pick `MAX_SESSION_HOURS` by doing that arithmetic against a number you are
-willing to pay, set an AWS Budget with an alert as a second line of defence, and
-watch `./admin.py sessions` during the first assignment to see what groups
-actually do.
+So: pick `MAX_SESSION_HOURS` and `GPU_HOUR_QUOTA` by doing that arithmetic
+against a number you are willing to pay, set an AWS Budget with an alert as a
+second line of defence, and watch `./admin.py sessions` during the first
+assignment to see what groups actually do.
 
 ---
 

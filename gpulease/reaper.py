@@ -14,7 +14,15 @@ Five cases:
   5. some of a group's nodes running, not all -> broken cluster, stop the rest
 
 Plus one that overrides all of them: once GPULEASE_DEADLINE passes, everything
-tagged for the course gets stopped, whatever the database believes.
+tagged for the course gets stopped, whatever the database believes. A grace
+period after that, and only with GPULEASE_TERMINATE_AT_DEADLINE on, the
+stopped instances are terminated to reclaim their volumes.
+
+Note what is *not* here: the GPU-hour budget. `db.claim` caps a new session's
+expires_at at whatever node-hours the group has left, so a group that is nearly
+out simply gets a short lease and case (1) ends it. Budget enforcement is that
+cap plus `db.accrue_and_close`; nothing accrues mid-session and no case below
+reads the quota.
 
 It can only ever *reduce* spend: nothing in here starts an instance.
 """
@@ -122,12 +130,16 @@ def _sweep_deadline(instances):
     Works off EC2 rather than the session table on purpose: an instance whose
     row was lost still costs money, and after the deadline nothing tagged for
     this course has any business running.
+
+    Later, and only if asked, it also reclaims the disks -- see _sweep_terminate.
     """
     actions = []
     ids = [i["InstanceId"] for i in instances]
     if ids:
         aws.stop_instances(ids, "assignment deadline passed")
         actions.append({"action": "deadline_stop", "instances": ids})
+
+    actions += _sweep_terminate()
 
     for row in db.all_sessions():
         if row["status"] not in db.LIVE:
@@ -140,6 +152,37 @@ def _sweep_deadline(instances):
     if actions:
         log.info("deadline %s passed: %s", config.deadline_str(), json.dumps(actions))
     return actions
+
+
+def _sweep_terminate():
+    """Once the grace period is up too, destroy what is left. Off by default.
+
+    A stopped instance still bills for its root volume, and at 30 groups x 2
+    nodes x 100 GB that is a few hundred dollars a month for disks nobody will
+    read again. This is what reclaims them.
+
+    Two things make it deliberately hard to fire by accident, because it is the
+    only operation in the system that destroys student work:
+    GPULEASE_TERMINATE_AT_DEADLINE defaults off in config.py, and
+    GPULEASE_TERMINATE_GRACE_HOURS puts a day between "everything stopped" and
+    "the volumes are gone" -- long enough for an instructor to notice a
+    mistyped deadline.
+
+    It re-describes rather than reusing the caller's list, which only holds
+    pending and running instances: by now the interesting ones are `stopped`,
+    and they are exactly the volumes being reclaimed. STATES_ALL excludes
+    `terminated`, so repeated passes converge on an empty list and this is
+    idempotent like everything else here.
+    """
+    if not (config.TERMINATE_AT_DEADLINE and config.TERMINATE_AT):
+        return []
+    if db.now() < config.TERMINATE_AT:
+        return []
+    ids = [i["InstanceId"] for i in aws.course_instances(states=aws.STATES_ALL)]
+    if not ids:
+        return []
+    aws.terminate_instances(ids, "assignment over, reclaiming volumes")
+    return [{"action": "deadline_terminate", "instances": ids}]
 
 
 def run_forever(interval=None):

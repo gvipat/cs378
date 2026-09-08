@@ -240,18 +240,27 @@ def all_sessions():
         return cx.execute("SELECT * FROM sessions").fetchall()
 
 
-def claim(group_id, assignment_id, session_id, student_id, expires, quota_seconds,
-          max_starts, node_count=1):
+def claim(group_id, assignment_id, session_id, student_id, expires_cap, quota_seconds,
+          max_starts, node_count=1, min_start_seconds=0):
     """Try to take the group's session slot for a new launch.
 
-    One transaction does four jobs: it enforces the per-assignment start limit
-    and the GPU-hour quota, it stops a second group member from launching a
-    duplicate instance, and it claims the session. All four have to be decided
-    against the same snapshot, or two simultaneous requests could each conclude
-    they were the group's one allowed start.
+    One transaction does five jobs: it enforces the per-assignment start limit
+    and the GPU-hour budget, it decides how long this session's lease may be,
+    it stops a second group member from launching a duplicate instance, and it
+    claims the session. All of it has to be decided against the same snapshot,
+    or two simultaneous requests could each conclude they were the group's one
+    allowed start.
 
-    Returns (ok, reason, row) where reason is "" | "live" | "quota" | "spent"
-    and row is the existing session when we lost.
+    `expires_cap` is the latest this lease may end for reasons that are not the
+    budget -- MAX_SESSION_HOURS, and the deadline. The budget shortens it
+    further: a group with forty minutes of node-hours left gets a forty-minute
+    lease, and the reaper's ordinary "lease expired" path is then what enforces
+    the budget. That is the whole of budget enforcement; nothing accrues
+    mid-session and no reaper case knows about the quota.
+
+    Returns (ok, reason, row) where reason is
+    "" | "live" | "spent" | "quota" | "exhausted" and row is the existing
+    session when we lost.
     """
     with write() as cx:
         row = cx.execute(
@@ -262,8 +271,20 @@ def claim(group_id, assignment_id, session_id, student_id, expires, quota_second
             return False, "live", row
         if row and max_starts and row["starts_used"] >= max_starts:
             return False, "spent", row
-        if row and row["gpu_seconds_used"] >= quota_seconds:
+
+        # Node-seconds, matching what accrue_and_close charges. The row is
+        # never LIVE here, so the column is the group's whole usage.
+        used = (row["gpu_seconds_used"] or 0) if row else 0
+        remaining = quota_seconds - used
+        if remaining <= 0:
             return False, "quota", row
+        if remaining < min_start_seconds:
+            # Enough budget to be charged for, not enough to be useful.
+            return False, "exhausted", row
+
+        # Budget is node-seconds; a lease is wall-clock seconds. Floor division
+        # so rounding can only ever end the session early.
+        expires = min(expires_cap, now() + remaining // max(1, node_count))
 
         cx.execute(
             "INSERT INTO sessions"
@@ -317,6 +338,40 @@ def grant_starts(group_id, assignment_id, extra=1):
             "SELECT starts_used FROM sessions WHERE group_id = ? AND assignment_id = ?",
             (group_id, assignment_id),
         ).fetchone()["starts_used"]
+
+
+def set_usage(group_id, assignment_id, seconds):
+    """Instructor override: set a group's consumed node-seconds outright.
+
+    The way back in once a group has spent its budget, now that unlimited
+    starts make `grant_starts` largely beside the point. Refuses while the
+    session is live, because `accrue_and_close` is about to add this session's
+    time to whatever it finds and would undo the correction.
+    """
+    with write() as cx:
+        row = cx.execute(
+            "SELECT * FROM sessions WHERE group_id = ? AND assignment_id = ?",
+            (group_id, assignment_id),
+        ).fetchone()
+        if row is None:
+            return None
+        if row["status"] in LIVE:
+            raise ValueError(
+                f"group {group_id} has a live session ({row['status']}); "
+                f"stop it first or its time will be added on top of this"
+            )
+        seconds = max(0, int(seconds))
+        cx.execute(
+            "UPDATE sessions SET gpu_seconds_used = ?"
+            " WHERE group_id = ? AND assignment_id = ?",
+            (seconds, group_id, assignment_id),
+        )
+        _log(
+            cx, group_id, assignment_id, None, "budget",
+            f"usage set to {seconds / 3600.0:.2f} node-hours "
+            f"(was {(row['gpu_seconds_used'] or 0) / 3600.0:.2f})",
+        )
+        return seconds
 
 
 def _set(group_id, assignment_id, **fields):
@@ -414,6 +469,26 @@ def set_running(group_id, assignment_id, nodes):
 
 def set_failed(group_id, assignment_id, error):
     _set(group_id, assignment_id, status=FAILED, last_error=str(error)[:500], private_key=None)
+
+
+def usage_seconds(row, at=None) -> int:
+    """Node-seconds used, including the session running right now. For display.
+
+    Nothing that makes a decision calls this. The budget is charged at stop by
+    `accrue_and_close` and checked at start by `claim`, both of which read the
+    column directly; this exists so a student watching a live session is not
+    shown a figure frozen at their last stop.
+
+    Keep the arithmetic identical to `accrue_and_close`, or the number a group
+    watches climb will not be the number they are eventually billed.
+    """
+    if row is None:
+        return 0
+    used = row["gpu_seconds_used"] or 0
+    if row["status"] in LIVE:
+        elapsed = max(0, (at or now()) - (row["started_at"] or now()))
+        used += elapsed * node_count(row)
+    return used
 
 
 def accrue_and_close(group_id, assignment_id, reason, new_status=STOPPING):

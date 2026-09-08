@@ -26,7 +26,16 @@ def _load_env_file(path: Path) -> None:
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
-_load_env_file(ROOT / "gpulease.env")
+# GPULEASE_ENV picks a different file, which is how gpulease.env.test is used:
+#
+#     GPULEASE_ENV=gpulease.env.test ./admin.py sessions
+#
+# It REPLACES gpulease.env rather than layering on top of it, so a test run
+# cannot inherit half of a production setting -- anything the chosen file omits
+# falls back to the code defaults. systemd is unaffected either way: the unit
+# passes gpulease.env as an EnvironmentFile and real environment variables
+# always win over anything read here.
+_load_env_file(Path(os.environ.get("GPULEASE_ENV") or ROOT / "gpulease.env"))
 
 
 def _str(name, default=""):
@@ -104,10 +113,26 @@ ACTIVE_ASSIGNMENT = _str("GPULEASE_ACTIVE_ASSIGNMENT", "hw1")
 # every lease is capped to end no later than this, and the reaper stops
 # anything still running. Unset (blank) means no deadline.
 DEADLINE = _deadline("GPULEASE_DEADLINE")
+
+# The budget. Cumulative *node*-hours a group may burn on one assignment,
+# charged at stop by db.accrue_and_close and checked at start by db.claim.
+# db.claim also caps a session's expires_at at whatever is left, so the reaper's
+# ordinary "lease expired" path is what enforces the budget -- there is no
+# separate mid-session accounting anywhere.
+#
+# It only rations anything when a group may start more than once: see
+# MAX_STARTS.
 GPU_HOUR_QUOTA = _float("GPULEASE_GPU_HOUR_QUOTA", 30)
+
+# The smallest lease worth handing out. Booting a node burns several minutes of
+# budget before a student can do anything with it, so a group with two minutes
+# left is better told they are out than given a two-minute cluster.
+MIN_START_MINUTES = _float("GPULEASE_MIN_START_MINUTES", 15)
+
 # How many times a group may start a session for one assignment. 1 means a
 # group gets a single lease: once it ends, for any reason, they are done until
-# you move to the next assignment or run `admin.py grant`. 0 means unlimited.
+# you move to the next assignment or run `admin.py grant`. 0 means unlimited,
+# which is the setting that makes GPU_HOUR_QUOTA the actual ration.
 MAX_STARTS = _int("GPULEASE_MAX_STARTS", 1)
 # With no idle watchdog on the instances, this is the only thing that bounds a
 # session's length, and so the only thing that bounds the bill. See the cost
@@ -135,8 +160,31 @@ if not 1 <= NODES_PER_GROUP <= MAX_NODES_PER_GROUP:
 # default; only worth changing if something else on the image wants it.
 MASTER_PORT = _int("GPULEASE_MASTER_PORT", 29500)
 
+# --- reclaiming disks after the deadline -----------------------------------
+# Instances are stopped for the life of an assignment, because the root volume
+# is the only persistence students get. Once the assignment is over those
+# volumes are pure cost -- 30 groups x 2 nodes x 100 GB is several hundred
+# dollars a month -- so the reaper may destroy them, but only after the
+# deadline and only if you ask for it.
+#
+# Default OFF here and ON in gpulease.env.example, the same deliberate mismatch
+# as t3.micro vs g4dn.xlarge: a missing config file should not destroy data for
+# the same reason it should not launch a GPU fleet. Note that DEADLINE is
+# parsed at import and the example ships a real date, so an install that takes
+# the example verbatim inherits both a deadline and this behaviour.
+TERMINATE_AT_DEADLINE = _str("GPULEASE_TERMINATE_AT_DEADLINE", "0") in ("1", "yes", "true")
+# Breathing room between "stop everything" and "destroy the volumes". This is a
+# window for the *instructor* to notice a mistyped deadline, not for students:
+# once the deadline passes nobody can start a session, and a stopped instance
+# cannot be sshed into. Warn students before the cutoff, not during this.
+TERMINATE_GRACE_HOURS = _float("GPULEASE_TERMINATE_GRACE_HOURS", 24)
+
 MAX_SESSION_SECONDS = int(MAX_SESSION_HOURS * 3600)
 QUOTA_SECONDS = int(GPU_HOUR_QUOTA * 3600)
+MIN_START_SECONDS = int(MIN_START_MINUTES * 60)
+# 0 when there is no deadline, which is also the "never terminate" case: the
+# reaper checks TERMINATE_AT_DEADLINE and a live DEADLINE before using this.
+TERMINATE_AT = DEADLINE + int(TERMINATE_GRACE_HOURS * 3600) if DEADLINE else 0
 
 # --- reaper ---------------------------------------------------------------
 REAPER_ENABLED = _str("GPULEASE_REAPER", "1") not in ("0", "no", "false")

@@ -63,8 +63,13 @@ def session_view(row, group_id):
             "starts_allowed": config.MAX_STARTS,
             "node_count": config.NODES_PER_GROUP,
             "deadline": config.DEADLINE or None,
+            "deadline_terminates": bool(config.TERMINATE_AT_DEADLINE and config.DEADLINE),
         }
-    used = (row["gpu_seconds_used"] or 0) / 3600.0
+    # Live usage, not the raw column: the column only moves when a session
+    # closes, so a group six hours into a session would otherwise watch it sit
+    # at whatever it was when they last stopped. Display only -- the budget is
+    # charged at stop and checked at start.
+    used = db.usage_seconds(row) / 3600.0
     view = {
         "group_id": row["group_id"],
         "assignment_id": row["assignment_id"],
@@ -78,12 +83,36 @@ def session_view(row, group_id):
         # was actually given even if the setting changes under them.
         "node_count": db.node_count(row),
         "deadline": config.DEADLINE or None,
+        # Students have to be told their disks do not survive the deadline
+        # while they can still act on it -- afterwards the box is stopped and
+        # unreachable.
+        "deadline_terminates": bool(config.TERMINATE_AT_DEADLINE and config.DEADLINE),
     }
     if row["status"] in db.LIVE:
         view["expires_at"] = row["expires_at"]
         view["started_at"] = row["started_at"]
         view["session_id"] = row["session_id"]
+        view["ends_because"] = _ends_because(row)
     return view
+
+
+def _ends_because(row):
+    """Which of the three caps decided this session's expires_at.
+
+    claim() takes the minimum of the lease length, the deadline and the budget
+    and stores one number, so the reason is not recoverable from the row -- it
+    is reconstructed here by asking which cap the stored value landed on. Only
+    for display: a student whose cluster dies in twenty minutes should be told
+    whether that is their budget or the assignment cutoff.
+    """
+    expires = row["expires_at"]
+    if not expires:
+        return None
+    if config.DEADLINE and expires >= config.DEADLINE:
+        return "deadline"
+    # Reconstructed against started_at, which is what claim() measured from.
+    lease_end = (row["started_at"] or 0) + config.MAX_SESSION_SECONDS
+    return "lease" if expires >= lease_end else "budget"
 
 
 @app.get("/healthz")
@@ -186,14 +215,19 @@ def start(student=Depends(caller)):
     # A lease may not outlive the deadline. Without this a group starting an
     # hour before the cutoff would hold an instance well past it, and the
     # deadline sweep below would be the only thing to catch them.
-    expires = now + config.MAX_SESSION_SECONDS
+    #
+    # This is the cap for everything that is not the budget; claim() shortens
+    # it further to whatever node-hours the group has left, off the same
+    # snapshot it checks the budget against.
+    expires_cap = now + config.MAX_SESSION_SECONDS
     if config.DEADLINE:
-        expires = min(expires, config.DEADLINE)
+        expires_cap = min(expires_cap, config.DEADLINE)
 
     nodes = config.NODES_PER_GROUP
     ok, reason, existing = db.claim(
-        gid, aid, session_id, student["student_id"], expires,
+        gid, aid, session_id, student["student_id"], expires_cap,
         config.QUOTA_SECONDS, config.MAX_STARTS, nodes,
+        min_start_seconds=config.MIN_START_SECONDS,
     )
     if not ok:
         if reason == "spent":
@@ -212,10 +246,33 @@ def start(student=Depends(caller)):
                 f"Group {gid} has used its {config.GPU_HOUR_QUOTA} GPU-hour budget for "
                 f"{aid}. Email the instructor if you need more.",
             )
+        if reason == "exhausted":
+            # Enough budget left to be billed for, not enough to boot a cluster
+            # and do anything with it. Say the number, so it is obvious this is
+            # a floor and not a bug.
+            # `existing` is None when the whole budget is smaller than the
+            # floor -- a misconfiguration rather than a group's spending, but a
+            # 429 explaining it beats a 500.
+            used = (existing["gpu_seconds_used"] or 0) if existing else 0
+            left = (config.QUOTA_SECONDS - used) / 3600.0
+            raise HTTPException(
+                429,
+                f"Group {gid} has {left:.2f} of its {config.GPU_HOUR_QUOTA} GPU-hours "
+                f"left for {aid}, and a session needs at least "
+                f"{config.MIN_START_MINUTES:g} minutes' worth "
+                f"({config.MIN_START_SECONDS * nodes / 3600.0:.2f} GPU-hours for "
+                f"{nodes} node{'s' if nodes != 1 else ''}). Email the instructor if "
+                f"you need more.",
+            )
         # Lost the race with a groupmate: hand back the session they started,
         # complete with the host and key, so the CLI can print an ssh line
         # instead of pretending it is launching something.
         return live_view(existing, gid)
+
+    # claim() may have shortened expires_cap to whatever the group's budget
+    # allows, and the LeaseExpiresAt tag has to carry the lease they actually
+    # got rather than the one they asked for.
+    expires = db.get_session(gid, aid)["expires_at"]
 
     try:
         private_key, public_key = keys.new_keypair(f"gpulease-{gid}-{session_id[:8]}")

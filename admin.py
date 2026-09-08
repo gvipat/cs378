@@ -7,7 +7,9 @@
     ./admin.py instances                # ground truth from EC2
     ./admin.py kill --group 7           # stop instances now
     ./admin.py reap                     # run one reconciliation pass
+    ./admin.py budget 7 --hours 0       # give group 7 their hours back
     ./admin.py grant 7                  # give group 7 another start
+    ./admin.py terminate                # destroy instances AND disks - no undo
     ./admin.py disable abc123           # revoke a token (enable puts it back)
 
 Run it on the control-plane box; it reads the same gpulease.env the service does.
@@ -123,6 +125,65 @@ def cmd_grant(args):
     print(f"group {args.group_id} on {aid}: starts used now {used}")
 
 
+def cmd_budget(args):
+    """Set a group's consumed node-hours.
+
+    The way back in once a group has spent its budget. With unlimited starts
+    this is what `grant` used to be: `--hours 0` gives them the whole budget
+    back, `--hours 45` leaves them 15 of a 60-hour allowance.
+
+    Refused while their session is live, because the stop that follows will add
+    that session's time on top of whatever is set here.
+    """
+    aid = args.assignment or config.ACTIVE_ASSIGNMENT
+    try:
+        seconds = db.set_usage(args.group_id, aid, args.hours * 3600)
+    except ValueError as e:
+        sys.exit(str(e))
+    if seconds is None:
+        sys.exit(f"no session row for group {args.group_id} on {aid} - nothing to set")
+    left = config.GPU_HOUR_QUOTA - seconds / 3600.0
+    print(f"group {args.group_id} on {aid}: {seconds / 3600.0:.2f} node-hours used, "
+          f"{left:.2f} of {config.GPU_HOUR_QUOTA} left")
+
+
+def cmd_terminate(args):
+    """Destroy this course's instances and their root volumes. Irreversible.
+
+    The reaper does this on its own once the deadline plus the grace period has
+    passed and GPULEASE_TERMINATE_AT_DEADLINE is on. This is the same thing on
+    demand, for when you are done with an assignment early or never turned that
+    on -- reclaiming the volumes is worth a few hundred dollars a month at 30
+    groups, and nothing else in the system frees them.
+    """
+    aid = args.assignment or config.ACTIVE_ASSIGNMENT
+    insts = [
+        i for i in aws.course_instances(states=aws.STATES_ALL)
+        if not args.group or aws.instance_tag(i, "Group") == args.group
+    ]
+    if not args.all_assignments:
+        insts = [i for i in insts if aws.instance_tag(i, "Assignment") == aid]
+    if not insts:
+        print("nothing to terminate")
+        return
+
+    live = [i for i in insts if i["State"]["Name"] in ("pending", "running")]
+    ids = [i["InstanceId"] for i in insts]
+    scope = "every assignment" if args.all_assignments else aid
+    print(f"terminating {len(ids)} instance(s) for {config.COURSE} / {scope}:")
+    for i in insts:
+        print(f"  {i['InstanceId']}  group {aws.instance_tag(i, 'Group', '?'):<8}"
+              f"{i['State']['Name']}")
+    if live:
+        print(f"\n{len(live)} of these are still RUNNING - a group may be working right now.")
+    print("\nThis DESTROYS their root volumes and every file on them. There is no undo.")
+    if input(f"type the course tag ({config.COURSE}) to confirm: ").strip() != config.COURSE:
+        print("nothing done")
+        return
+    aws.terminate_instances(ids, "instructor terminate")
+    print("done. The reaper will reconcile the database within a couple of minutes.")
+
+
 def cmd_sessions(args):
     rows = sorted(db.all_sessions(), key=lambda r: (r["status"], r["group_id"]))
     limit = config.MAX_STARTS or "-"
@@ -133,7 +194,10 @@ def cmd_sessions(args):
           f"{'NODES':<7}INSTANCES")
     total = 0.0
     for r in rows:
-        hrs = (r["gpu_seconds_used"] or 0) / 3600
+        # usage_seconds, not the column: a live session has not been billed
+        # yet, and an instructor checking who is about to run out needs the
+        # number that includes what is running right now.
+        hrs = db.usage_seconds(r) / 3600
         total += hrs
         up = fmt_age(r["started_at"]) if r["status"] in db.LIVE else "-"
         starts = f"{r['starts_used']}/{limit}"
@@ -151,6 +215,18 @@ def cmd_sessions(args):
         spent = sum(1 for r in rows if r["starts_used"] >= config.MAX_STARTS
                     and r["status"] not in db.LIVE)
         print(f"{spent} group(s) have used up their sessions (./admin.py grant <group>)")
+    else:
+        # With unlimited starts the budget is the ration, so this is the line
+        # that says who is about to be locked out.
+        out, low = 0, 0
+        for r in rows:
+            left = config.QUOTA_SECONDS - db.usage_seconds(r)
+            if left <= 0:
+                out += 1
+            elif left < config.MIN_START_SECONDS * db.node_count(r):
+                low += 1
+        print(f"{out} group(s) out of budget, {low} with too little left to start "
+              f"(./admin.py budget <group> --hours N)")
 
 
 def cmd_instances(args):
@@ -214,6 +290,20 @@ if __name__ == "__main__":
     p = sub.add_parser("kill", help="stop instances now")
     p.add_argument("--group", help="limit to one group")
     p.set_defaults(func=cmd_kill)
+
+    p = sub.add_parser("budget", help="set a group's used node-hours")
+    p.add_argument("group_id")
+    p.add_argument("--hours", type=float, required=True,
+                   help="node-hours to record as USED (0 = full budget back)")
+    p.add_argument("--assignment", help="default: the active one")
+    p.set_defaults(func=cmd_budget)
+
+    p = sub.add_parser("terminate", help="destroy instances AND their disks")
+    p.add_argument("--group", help="limit to one group")
+    p.add_argument("--assignment", help="default: the active one")
+    p.add_argument("--all-assignments", action="store_true",
+                   help="every assignment, not just one")
+    p.set_defaults(func=cmd_terminate)
 
     p = sub.add_parser("grant", help="give a group another start")
     p.add_argument("group_id")

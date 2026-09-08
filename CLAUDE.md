@@ -33,6 +33,13 @@ setup.sh        the installer; idempotent, safe to re-run
 iam-policy.json permissions for the lease host
 Caddyfile.example the TLS terminator in front of the API; copy to /etc/caddy
 gpulease.env    local, gitignored; gpulease.env.example is the template
+gpulease.env.test  t3.micro + minutes, for the manual checklist. Selected with
+                GPULEASE_ENV=gpulease.env.test, which REPLACES gpulease.env
+                rather than layering on it. Its GPULEASE_COURSE is deliberately
+                not the production one -- that tag is the blast radius for every
+                stop and terminate -- which means the host's IAM policy needs
+                both tags (StringEquals takes a list). Do not "fix" the mismatch
+                by pointing it at the real course.
 var/gpulease.db the whole system state
 ```
 
@@ -79,6 +86,12 @@ config surface changes.
 # Local dev (no AWS needed for /healthz and auth; anything touching EC2 will fail)
 GPULEASE_DB=/tmp/dev.db GPULEASE_REAPER=0 .venv/bin/uvicorn gpulease.api:app --reload
 
+# The manual checklist, on t3.micro. `db init` first: setup.sh only ever
+# initialises gpulease.env's database, so admin reads otherwise die with
+# `no such table: sessions`.
+export GPULEASE_ENV=gpulease.env.test
+python -m gpulease.db init
+
 # On the lease host
 sudo ./setup.sh                     # install or re-install after a git pull
 sudo systemctl restart gpulease     # after editing gpulease.env (except GPULEASE_HOST)
@@ -90,7 +103,9 @@ journalctl -u gpulease -f
 ./admin.py reap                     # one reconciliation pass
 ./admin.py kill --group 7
 ./admin.py disable abc123           # revoke one token; `enable` restores it
+./admin.py budget 7 --hours 0       # reset a group's used node-hours
 ./admin.py grant 7                  # give a group another start
+./admin.py terminate                # destroy instances AND disks; irreversible
 ./admin.py preflight                # check the host's IAM permissions
 
 curl -s localhost:8000/healthz      # on the host; the API binds to localhost
@@ -102,9 +117,11 @@ GPULEASE_API=https://host python3 cli/gpulease.py login <token> | start | status
 
 **There is no automated test suite.** `README.md` → "Verifying a deployment" is
 the manual checklist: concurrent start, start-limit and quota exhaustion,
-reaper idempotency, orphan cleanup, deadline enforcement, resume-with-a-new-key,
-readiness timing, and the multi-node cases (one subnet, peers over IMDS,
-cross-group isolation, partial cluster).
+reaper idempotency, orphan cleanup, deadline enforcement, budget exhaustion and
+the budget-capped lease, termination after the deadline (including that a
+*stopped* instance is reclaimed), resume-with-a-new-key, readiness timing, and
+the multi-node cases (one subnet, peers over IMDS, cross-group isolation,
+partial cluster).
 
 ## Invariants worth preserving
 
@@ -117,13 +134,38 @@ of increasing spend — it has no launch path. It is level-triggered and every
 action is idempotent, so a missed, crashed or duplicated pass all converge.
 
 **`db.claim()` is the load-bearing function.** One `BEGIN IMMEDIATE`
-transaction enforces the per-assignment start limit and the GPU-hour quota,
-blocks a duplicate launch by a second group member, records how many nodes the
-session gets, and claims the session. All
+transaction enforces the per-assignment start limit and the GPU-hour budget,
+decides how long the lease may be, blocks a duplicate launch by a second group
+member, records how many nodes the session gets, and claims the session. All
 of it must be decided against one snapshot — two simultaneous requests each
 concluding they were the group's one allowed start is exactly the bug this
 prevents. The race loser gets the existing session (200, not an error). This is
 the most likely place for a real concurrency bug.
+
+**The hour budget is enforced by the lease, not by a reaper case.** `claim()`
+stores `expires_at = min(expires_cap, now + remaining // node_count)`, so a
+group with forty node-minutes left gets a twenty-minute two-node lease and the
+reaper's ordinary "lease expired" path (case 1) ends and bills it. `api.start`
+owns `expires_cap` — `MAX_SESSION_HOURS` ∧ the deadline — and `claim()`
+shortens it, because the budget must come off the same snapshot as the quota
+check. Nothing accrues mid-session: `db.accrue_and_close` is still the only
+writer of `gpu_seconds_used`, charged once when the session ends. Do not add a
+periodic flush or a reaper case that reads the quota; the cap is what makes
+neither necessary, and a second writer is how the column starts double-counting.
+
+`db.usage_seconds()` is display only — `session_view` and `admin.py sessions`,
+so a live session's hours are not frozen at the last stop. Its arithmetic must
+stay identical to `accrue_and_close`, or students watch a number they are not
+billed. Nothing that makes a decision may call it.
+
+`GPULEASE_MIN_START_MINUTES` refuses a start whose remaining budget is below it,
+returning reason `"exhausted"` rather than `"quota"`. Booting costs budget, so a
+lease shorter than this is billable and useless.
+
+**`db.set_usage()` is the instructor's budget override** (`admin.py budget`) and
+the only other thing that writes `gpu_seconds_used`. It refuses while the
+session is LIVE, because `accrue_and_close` is about to add that session's time
+to whatever it finds and would undo the correction.
 
 **`GPULEASE_MAX_STARTS` rations starts per `(group, assignment)`**, default 1.
 `starts_used` increments inside `claim()`; `db.refund_start()` gives it back on
@@ -159,17 +201,20 @@ and a few static files describing its peers (`/etc/gpulease/peers`,
 written once at boot, not a process. No agent, no timer, nothing that phones
 home; the peer data comes from link-local IMDS, not from the control plane. So:
 
-- **`GPULEASE_MAX_SESSION_HOURS` is the only bound on a session**, enforced by
-  the reaper on the lease host. Do not move any cost control onto the instance:
+- **`GPULEASE_MAX_SESSION_HOURS` bounds a session**, enforced by
+  the reaper on the lease host — as does whatever is left of
+  `GPULEASE_GPU_HOUR_QUOTA`, through the same `expires_at`. Do not move any cost control onto the instance:
   students have root there and can stop anything that runs on it. The setting
   is a wall-clock lease length and `NODES_PER_GROUP` does not change it — what
   it multiplies is the *bill*: the worst case is
   `groups x nodes x hours x $/hour`, so raising the node count raises the bill
   by exactly that factor with no change to how long a lease lasts.
-- **`GPULEASE_GPU_HOUR_QUOTA` is inert when `MAX_STARTS=1`**, because it is only
-  checked when a group starts and a group only starts once. It matters if
-  `MAX_STARTS=0`. Do not present it as a live cost control in that config. It
-  is counted in node-hours.
+- **`GPULEASE_GPU_HOUR_QUOTA` is the hour budget, and it is inert when
+  `MAX_STARTS=1`** — it is only consulted when a group starts, and a group that
+  may start once is only ever checked once. Do not present it as a live cost
+  control in that config. It is counted in node-hours, and
+  `gpulease.env.example` ships `MAX_STARTS=0` with a 60-hour budget, which is
+  the configuration where it is the ration.
 
 **`bootcmd` runs before cloud-init's `users-groups` module**, so on a *first*
 boot the `ubuntu` user does not exist yet — hence the `id -u ubuntu` guard, with
@@ -188,13 +233,25 @@ the probe arrives from the private address. It also **revokes** tcp/22 IPv4
 rules that are no longer in `GPULEASE_ALLOWED_SSH_CIDRS`, so narrowing that
 setting actually closes the old range. Keep the reconcile; add-only was a bug.
 
-**The service can stop instances but not terminate them.** `iam-policy.json`
-has no `ec2:TerminateInstances`, on purpose: instances are stopped and never
-terminated for the life of an assignment, because the root EBS volume is the
-only persistence students get and nothing reachable from a student request
-should be able to destroy their work. Ending an assignment is a manual step run
-with the instructor's own credentials (README → "Ending an assignment"). Do not
-add TerminateInstances to make cleanup convenient.
+**The service terminates only after the deadline, and only if asked.** For the
+life of an assignment instances are stopped and never terminated: the root EBS
+volume is the only persistence students get, and nothing reachable from a
+student request may destroy their work. `iam-policy.json` does carry
+`ec2:TerminateInstances`, in its own `TerminateAfterDeadline` statement scoped
+on `ec2:ResourceTag/Course`, but the only caller is
+`reaper._sweep_terminate()` and it is gated three ways: `GPULEASE_DEADLINE` must
+have passed, plus `GPULEASE_TERMINATE_GRACE_HOURS` on top of it, with
+`GPULEASE_TERMINATE_AT_DEADLINE` on — and that setting defaults *off* in
+`config.py` while `gpulease.env.example` ships it on, the same deliberate
+mismatch as `t3.micro`/`g4dn.xlarge`. The grace period is there because
+`GPULEASE_DEADLINE` is parsed at import from a file that ships with a real date
+in it: a mistyped deadline should cost a day of stopped instances, not every
+group's work. Do not widen any of that to make cleanup convenient; the
+on-demand path is `admin.py terminate`, which makes a human type the course tag.
+
+`_sweep_terminate()` re-describes with `STATES_ALL` rather than reusing the
+list `run_once()` passes the deadline sweep, which holds only pending and
+running instances. The volumes worth reclaiming belong to the *stopped* ones.
 
 **`aws.describe_many()` falls back to describing one at a time.** A single
 unknown instance id fails the whole `DescribeInstances` batch, so a node that
@@ -222,7 +279,8 @@ a `SystemExit` at boot rather than a cost control that silently never fires,
 and a value with no UTC offset is read as UTC — which a syllabus date almost
 never is. Consequences: it is a restart to change, and `gpulease.env.example`
 ships with a date already filled in, so a fresh install that takes the example
-verbatim inherits a real deadline.
+verbatim inherits a real deadline — and, since the example also ships
+`GPULEASE_TERMINATE_AT_DEADLINE=1`, a date on which volumes get destroyed.
 
 **`GPULEASE_DEADLINE` is enforced in three places, and needs all three.**
 `api.start` refuses new sessions past it *and* caps `expires_at` so no lease
@@ -230,8 +288,9 @@ outlives it; `reaper._sweep_deadline()` stops everything tagged for the course
 once it passes. The sweep is not redundant with the cap: sessions already
 running when the deadline was configured have an uncapped `expires_at`, and it
 works off EC2 rather than the session table because an instance whose row was
-lost still costs money. It stops, never terminates — the "service cannot
-terminate" invariant holds after the deadline too.
+lost still costs money. The sweep itself only ever *stops*; terminating is a
+separate, later, opt-in step in `_sweep_terminate()` — see "The service
+terminates only after the deadline" above.
 
 **A group's nodes come from ONE `run_instances` call**, `MinCount == MaxCount
 == n`. That single call is what guarantees they share a subnet and an AZ, and
