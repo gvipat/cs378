@@ -9,15 +9,15 @@ mid-semester without asking 60 people to upgrade.
 Students need no AWS account and no AWS credentials - just the course token
 and the URL of the lease service.
 
-    export GPULEASE_API=http://<lease-host>:8000
-    gpulease login <token>
-    gpulease start
-    gpulease status
-    gpulease stop
-
 A group's lease may be more than one instance -- the server decides how many.
 All of them accept the same session key, and they sit on one subnet so they can
 reach each other on any port, which is what a distributed run needs.
+
+This docstring is for whoever maintains the file, and is deliberately NOT what
+argparse prints: it used to be, and the rewrapping turned the usage block into
+one unreadable line while telling students how the instructor changes the rules
+mid-semester. Student-facing help is DESCRIPTION and EPILOG below, printed
+verbatim. The long version is the README next to this file; keep them in step.
 """
 
 import argparse
@@ -39,6 +39,56 @@ SSH_DIR = os.path.expanduser("~/.ssh")
 
 POLL_INTERVAL = 5
 POLL_TIMEOUT = 420
+
+
+def _prog():
+    """The command the student actually typed, for the examples in --help.
+
+    Someone running `python3 gpulease.py` should not be told to type
+    `gpulease`, and someone who dropped it on their PATH should not be told to
+    type `python3`. argparse's default is the bare basename, which gets the
+    first case wrong in a way that reads as a broken instruction.
+    """
+    name = os.path.basename(sys.argv[0]) or "gpulease"
+    return f"python3 {name}" if name.endswith(".py") else name
+
+
+PROG = _prog()
+
+DESCRIPTION = """\
+Request and release your group's GPU nodes.
+
+Your group shares one lease. Whoever runs `start` first brings the nodes up;
+everyone else's `start` hands back those same nodes and the same key. `stop`
+ends the session for the whole group, so tell them before you run it.
+"""
+
+# Printed verbatim (RawDescriptionHelpFormatter), so the alignment below is
+# what the student sees. The address is echoed because the commonest support
+# question is "cannot reach the lease service", and the answer is nearly always
+# that GPULEASE_API is unset and this is the baked-in default.
+EPILOG = f"""\
+first time on this machine:
+  export GPULEASE_API=https://<your-course-server>    # add to your shell rc
+  {PROG} login <your-token>
+
+after that:
+  {PROG} start     a few minutes, then an ssh command per node
+  {PROG} status    check on it any time, from anywhere
+  {PROG} stop      when you are done - idle nodes bill too
+
+currently talking to:
+  {API_URL}
+  (change it with GPULEASE_API; if a command cannot reach the service, check
+   this is the address your instructor gave you)
+
+files this keeps on your machine:
+  ~/.config/gpulease/credentials    your saved token
+  ~/.ssh/gpulease_<group>           this session's key, replaced every session
+
+The full guide - the multi-node environment on the nodes, and what survives a
+stop - is the gpulease README from the course page.
+"""
 
 
 def die(msg, code=1):
@@ -271,18 +321,80 @@ def cmd_stop(args):
     print("  warning: could not confirm shutdown. Run 'gpulease status' shortly.")
 
 
-def main():
-    p = argparse.ArgumentParser(prog="gpulease", description=__doc__)
-    sub = p.add_subparsers(dest="cmd", required=True)
+RAW = argparse.RawDescriptionHelpFormatter
 
-    lg = sub.add_parser("login", help="save your course token")
-    lg.add_argument("token")
+
+def main():
+    p = argparse.ArgumentParser(
+        prog=PROG,
+        description=DESCRIPTION,
+        epilog=EPILOG,
+        formatter_class=RAW,
+    )
+    # metavar keeps `{login,start,status,stop}` out of the usage line; the four
+    # commands are listed underneath with their help anyway.
+    sub = p.add_subparsers(dest="cmd", required=True, title="commands", metavar="<command>")
+
+    lg = sub.add_parser(
+        "login",
+        help="save your course token (once per machine)",
+        formatter_class=RAW,
+        description=(
+            "Save your course token on this machine.\n\n"
+            "The token is yours personally, not your group's: do not share it or\n"
+            "paste it into a chat. It is stored in ~/.config/gpulease/credentials,\n"
+            "readable only by you. Nobody can look up a lost token, not even your\n"
+            "instructor - they reissue instead."
+        ),
+    )
+    lg.add_argument("token", help="the token from your instructor")
     lg.set_defaults(func=cmd_login)
 
-    sub.add_parser("start", help="start your group's GPU instance").set_defaults(func=cmd_start)
-    sub.add_parser("status", help="show current lease").set_defaults(func=cmd_status)
-    st = sub.add_parser("stop", help="stop your group's instance")
-    st.add_argument("-y", "--yes", action="store_true", help="skip the confirmation prompt")
+    sub.add_parser(
+        "start",
+        help="bring up your group's nodes",
+        formatter_class=RAW,
+        description=(
+            "Bring up your group's nodes and print an ssh command for each.\n\n"
+            "This waits until every node is actually accepting ssh, which takes a\n"
+            "few minutes, so the commands it prints work as soon as you see them.\n"
+            "If it gives up waiting, the nodes are usually still on their way up:\n"
+            "run `status` a minute later.\n\n"
+            "If your group already has a session, this hands you that one rather\n"
+            "than starting a second."
+        ),
+    ).set_defaults(func=cmd_start)
+
+    sub.add_parser(
+        "status",
+        help="show the lease, the budget and the ssh commands",
+        formatter_class=RAW,
+        description=(
+            "Show your group's lease: every node with its ssh command, when the\n"
+            "lease ends and which limit ended it, the gpu-hours your group has\n"
+            "used and has left, and the assignment deadline.\n\n"
+            "Gpu-hours are counted per node, so a two-node session spends two of\n"
+            "them for every hour it is up."
+        ),
+    ).set_defaults(func=cmd_status)
+
+    st = sub.add_parser(
+        "stop",
+        help="shut the nodes down and stop the charges",
+        formatter_class=RAW,
+        description=(
+            "Stop every node in your group's lease.\n\n"
+            "Your files under /home/ubuntu survive; the billing stops. This ends\n"
+            "the session for your whole group, not just for you.\n\n"
+            "If your group gets only one session for the assignment, stopping is\n"
+            "permanent and you will be asked to type 'stop' to confirm."
+        ),
+    )
+    st.add_argument(
+        "-y", "--yes",
+        action="store_true",
+        help="skip that confirmation - there is no undo",
+    )
     st.set_defaults(func=cmd_stop)
 
     args = p.parse_args()
