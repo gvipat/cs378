@@ -32,7 +32,7 @@ import urllib.request
 # 2: multi-node. A version 1 client only ever displayed one host and would
 # hide half of a two-node cluster, so the server refuses it outright.
 VERSION = 2
-API_URL = os.environ.get("GPULEASE_API", "http://localhost:8000")
+API_URL = os.environ.get("GPULEASE_API", "https://utcs378-infra.duckdns.org")
 CONFIG_DIR = os.path.expanduser("~/.config/gpulease")
 CRED_FILE = os.path.join(CONFIG_DIR, "credentials")
 SSH_DIR = os.path.expanduser("~/.ssh")
