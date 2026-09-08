@@ -6,9 +6,17 @@ __pycache__/
 gpulease.env
 var/
 
-# secrets and PII - never commit these
+# secrets and PII - never commit these.
+#
+# Rosters do not arrive named roster.csv. They arrive named whatever the SIS or
+# Google Forms called them -- "CS 378 Groups - Form Responses 1.csv" -- and that
+# one carries student names and EIDs, so matching two exact filenames is one
+# `git add -A` away from pushing a class list to a public remote. Ignore every
+# CSV instead and allow back the one fixture the manual checklist needs.
 tokens.csv
 roster.csv
+*.csv
+!test-roster.csv
 
 # build/deploy artifacts
 *.tar.gz
