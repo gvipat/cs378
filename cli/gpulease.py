@@ -78,16 +78,9 @@ after that:
   {PROG} status    check on it any time, from anywhere
   {PROG} stop      when you are done - idle nodes bill too
 
-talking to {API_URL}
-  built in - there is nothing to set up. If your instructor ever moves the
-  service, they will give you a new address to export as GPULEASE_API.
-
 files this keeps on your machine:
   ~/.config/gpulease/credentials    your saved token
   ~/.ssh/gpulease_<group>           this session's key, replaced every session
-
-The full guide - the multi-node environment on the nodes, and what survives a
-stop - is the gpulease README from the course page.
 """
 
 
