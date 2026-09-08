@@ -32,7 +32,7 @@ import urllib.request
 # 2: multi-node. A version 1 client only ever displayed one host and would
 # hide half of a two-node cluster, so the server refuses it outright.
 VERSION = 2
-API_URL = os.environ.get("GPULEASE_API", "http://localhost:8000")
+API_URL = os.environ.get("GPULEASE_API", "https://utcs378-infra.duckdns.org")
 CONFIG_DIR = os.path.expanduser("~/.config/gpulease")
 CRED_FILE = os.path.join(CONFIG_DIR, "credentials")
 SSH_DIR = os.path.expanduser("~/.ssh")
@@ -126,13 +126,35 @@ def show(view, key_path=None):
     elif view.get("host"):
         print(f"  host         {view['host']}")
     if view.get("expires_at"):
-        print(f"  lease ends   in {fmt_remaining(view['expires_at'])}")
-    print(
-        f"  gpu-hours    {view.get('gpu_hours_used', 0)} used / "
-        f"{view.get('gpu_hours_quota')} allowed"
-    )
+        # Say which cap this lease landed on. "Ends in 40m" reads like a bug
+        # when the group expected eight hours; "ends in 40m (budget)" is the
+        # same fact with the reason attached.
+        why = {
+            "budget": "  (all the gpu-hours you have left)",
+            "deadline": "  (the assignment deadline)",
+            "lease": "",
+        }.get(view.get("ends_because"), "")
+        print(f"  lease ends   in {fmt_remaining(view['expires_at'])}{why}")
+    used = view.get("gpu_hours_used", 0)
+    quota = view.get("gpu_hours_quota")
+    left = view.get("gpu_hours_remaining")
+    line = f"  gpu-hours    {used} used / {quota} allowed"
+    if left is not None:
+        line += f"   ({left} left)"
+    print(line)
+    # Counted per node: the number moves at node_count per wall-clock hour, and
+    # a group that does not know that will plan against half the budget.
+    count = view.get("node_count") or 1
+    if count > 1:
+        print(f"               counted per node, so {count} gpu-hours per hour running")
     if view.get("deadline"):
         print(f"  deadline     {fmt_deadline(view['deadline'])}")
+        if view.get("deadline_terminates"):
+            # The one warning that has to arrive early: after the deadline the
+            # nodes are stopped and unreachable, so there is no copying
+            # anything off once it fires.
+            print("               your nodes and their DISKS are deleted after this")
+            print("               - copy anything you want to keep off before then")
     # Only worth showing when starts are actually rationed, and worth showing
     # loudly then: stopping is irreversible and students should know before
     # they type it, not after.

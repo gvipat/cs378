@@ -755,6 +755,28 @@ def stop_instances(instance_ids, reason=""):
             log.error("stop failed for %s: %s", instance_ids, e)
 
 
+def terminate_instances(instance_ids, reason=""):
+    """Destroy instances and their root volumes. Not reachable from a request.
+
+    The only caller is the reaper's deadline sweep, and only once the deadline
+    plus GPULEASE_TERMINATE_GRACE_HOURS has passed with
+    GPULEASE_TERMINATE_AT_DEADLINE on. Everything before that point stops
+    instances, because the root volume is the only persistence students get.
+
+    Logged at error level on purpose: this is the one operation in the system
+    that destroys student work, and it should be impossible to find a bill for
+    a term's deleted volumes without also finding the line that deleted them.
+    """
+    if not instance_ids:
+        return
+    log.error("TERMINATING %s (%s) - root volumes go with them", instance_ids, reason)
+    try:
+        ec2.terminate_instances(InstanceIds=list(instance_ids))
+    except ClientError as e:
+        if "NotFound" not in e.response["Error"]["Code"]:
+            log.error("terminate failed for %s: %s", instance_ids, e)
+
+
 # ---------------------------------------------------------------- preflight
 
 
