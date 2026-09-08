@@ -1,8 +1,10 @@
-# TLS for the gpu-lease API. Copy to /etc/caddy/Caddyfile and edit the name.
+# TLS for the gpu-lease API. Copy to /etc/caddy/Caddyfile.
 #
 #     sudo cp Caddyfile.example /etc/caddy/Caddyfile
-#     sudo nano /etc/caddy/Caddyfile     # put your own DNS name at the top
 #     sudo systemctl reload caddy
+#
+# The name below is this deployment's; edit it only if you claimed a different
+# one, and change API_URL in cli/gpulease.py to match if you do.
 #
 # Caddy gets a certificate from Let's Encrypt on first start, renews it on its
 # own, and redirects http -> https. Nothing in gpulease knows this is here: the
@@ -23,6 +25,6 @@
 # the security group; a plaintext port still listening beside the TLS one is
 # the whole problem, unmoved.
 
-cs378.example.edu {
+utcs378-infra.duckdns.org {
 	reverse_proxy 127.0.0.1:8000
 }

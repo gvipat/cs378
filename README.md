@@ -269,18 +269,34 @@ like they should serve as one and cannot:
 
 A department subdomain or a cheap domain both work. If you have neither and do
 not want to buy one, a free dynamic-DNS name is a real answer rather than a
-compromise — claim one at [duckdns.org](https://duckdns.org), set it to the
-Elastic IP, and Let's Encrypt issues for it exactly as it would for a domain you
-paid for:
+compromise: Let's Encrypt issues for one exactly as it would for a domain you
+paid for. This deployment uses [duckdns.org](https://duckdns.org), which takes
+about two minutes:
 
-```
-cs378-lease.duckdns.org
-```
+1. Sign in at duckdns.org with GitHub, Google, Twitter or Reddit. There is no
+   password to manage and nothing to pay.
+2. Type a name into the **sub domain** box and click **add domain**. That claims
+   `<name>.duckdns.org` — for this course, `utcs378-infra.duckdns.org`.
+3. **Replace the pre-filled `current ip` with the lease host's Elastic IP** and
+   click **update ip**. This is the step to be careful about: the box arrives
+   pre-filled with the address *you are browsing from*, so claiming the name and
+   walking away points it at your laptop, and Caddy's certificate request then
+   goes to whatever machine that is. The error it produces looks like a Caddy
+   problem and is not.
+4. Confirm it before installing Caddy:
 
-No updater cron is needed, because the Elastic IP is static; the record is set
-once. Check it resolves before you touch Caddy — `dig +short <your-name>` — since
-a name that does not resolve yet and a port 80 that is still closed produce
-similar-looking failures.
+   ```bash
+   dig +short utcs378-infra.duckdns.org     # must print the Elastic IP
+   ```
+
+No updater cron is needed, because the Elastic IP is static — the record is set
+once and the token DuckDNS shows you is only for automated updates you will not
+be making. Do check step 4 rather than assuming, since a name that does not
+resolve yet and a port 80 that is still closed produce similar-looking failures.
+
+The name has to match `API_URL` in `cli/gpulease.py`, which ships pointing at
+`utcs378-infra.duckdns.org` so students who never set `GPULEASE_API` still reach
+the right host. If you use a different name, change it there too.
 
 If you ever rebuild the lease host, that DNS record is the one piece of this
 system that lives outside the repo and has to be updated by hand.
@@ -295,7 +311,8 @@ curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
 sudo apt-get update && sudo apt-get install -y caddy
 
 sudo cp Caddyfile.example /etc/caddy/Caddyfile
-sudo nano /etc/caddy/Caddyfile        # replace cs378.example.edu with your name
+sudo nano /etc/caddy/Caddyfile        # only if you claimed a name other than
+                                      # utcs378-infra.duckdns.org
 sudo systemctl reload caddy
 ```
 
@@ -303,7 +320,7 @@ Caddy requests the certificate on that first reload and renews it on its own.
 Confirm from your own machine, not the host:
 
 ```bash
-curl -s https://cs378.example.edu/healthz
+curl -s https://utcs378-infra.duckdns.org/healthz
 ```
 
 A hang means port 80 or 443 is still closed on the host security group; a
@@ -336,7 +353,7 @@ file, Python 3.9+, no AWS account and no dependencies — their own row from
 Print the line to send them, so the address is never retyped:
 
 ```bash
-echo "export GPULEASE_API=https://cs378.example.edu"   # your name from step 5
+echo "export GPULEASE_API=https://utcs378-infra.duckdns.org"   # the name from step 5
 ```
 
 What each student then runs — no AWS account, no dependencies, their own token
