@@ -22,22 +22,16 @@ a second set. `stop` ends it for everybody.
 You need Python 3.9 or newer. Check with `python3 --version`.
 
 Save the `gpulease.py` file your instructor gave you somewhere you can find it,
-then point it at the course server:
-
-```bash
-export GPULEASE_API=https://<the-address-your-instructor-gave-you>
-```
-
-Put that line in your `~/.bashrc` or `~/.zshrc` so you do not have to retype it
-every time you open a terminal. (Your copy of the CLI may already default to the
-right address — if `gpulease status` works without setting `GPULEASE_API`, you
-can skip this.)
-
-Now log in with your personal token:
+then log in with your personal token:
 
 ```bash
 python3 gpulease.py login <your-token>
 ```
+
+There is nothing to configure first. The course server's address is built into
+the file — `gpulease --help` prints the one it will use. (If your instructor
+ever moves the service, they will give you a new address and tell you to
+`export GPULEASE_API=https://...`; until then you can ignore that.)
 
 It prints your name, your group, and the assignment that is currently active.
 The token is saved to `~/.config/gpulease/credentials`, readable only by you, and
@@ -217,9 +211,11 @@ The token is wrong, or your access was revoked. Re-run `login`, pasting the toke
 carefully; if it still fails, email your instructor.
 
 **`error: cannot reach the lease service: ...`**
-Either `GPULEASE_API` is unset or wrong, or the service is down. Check the
-address matches exactly what your instructor gave you (including `https://`). If
-it does, ask on the course forum — you are probably not the only one.
+Usually the service is down or your network is blocking it — try again, then ask
+on the course forum, where you are probably not the only one. Run
+`gpulease --help` to see which address it is trying: if that is not the one your
+instructor named, you have an old copy of the file, or a stray `GPULEASE_API`
+left in your shell (`unset GPULEASE_API` clears it).
 
 **`error: Your CLI is out of date. Reinstall it and try again.`**
 Download the current `gpulease.py` from the course page, replacing your copy.
@@ -269,7 +265,6 @@ a restart.
 ## Quick reference
 
 ```bash
-export GPULEASE_API=https://<course-server>   # in your shell rc
 gpulease login <token>                        # once per machine
 gpulease start                                # bring up the group's nodes
 gpulease status                               # lease, budget, ssh lines

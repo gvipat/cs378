@@ -64,12 +64,13 @@ ends the session for the whole group, so tell them before you run it.
 """
 
 # Printed verbatim (RawDescriptionHelpFormatter), so the alignment below is
-# what the student sees. The address is echoed because the commonest support
-# question is "cannot reach the lease service", and the answer is nearly always
-# that GPULEASE_API is unset and this is the baked-in default.
+# what the student sees. The address is echoed rather than asked for: it is
+# baked into API_URL above, so there is nothing for a student to configure, and
+# showing it turns "cannot reach the lease service" into a one-look diagnosis.
+# GPULEASE_API is mentioned only as an override -- it exists for running the
+# CLI against a local instance, which is not something a student does.
 EPILOG = f"""\
 first time on this machine:
-  export GPULEASE_API=https://<your-course-server>    # add to your shell rc
   {PROG} login <your-token>
 
 after that:
@@ -77,10 +78,9 @@ after that:
   {PROG} status    check on it any time, from anywhere
   {PROG} stop      when you are done - idle nodes bill too
 
-currently talking to:
-  {API_URL}
-  (change it with GPULEASE_API; if a command cannot reach the service, check
-   this is the address your instructor gave you)
+talking to {API_URL}
+  built in - there is nothing to set up. If your instructor ever moves the
+  service, they will give you a new address to export as GPULEASE_API.
 
 files this keeps on your machine:
   ~/.config/gpulease/credentials    your saved token
