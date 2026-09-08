@@ -286,13 +286,22 @@ def claim(group_id, assignment_id, session_id, student_id, expires_cap, quota_se
         remaining = quota_seconds - used
         if remaining <= 0:
             return False, "quota", row
-        if remaining < min_start_seconds:
-            # Enough budget to be charged for, not enough to be useful.
-            return False, "exhausted", row
-
         # Budget is node-seconds; a lease is wall-clock seconds. Floor division
         # so rounding can only ever end the session early.
-        expires = min(expires_cap, now() + remaining // max(1, node_count))
+        nodes = max(1, node_count)
+        lease = remaining // nodes
+
+        if lease < min_start_seconds:
+            # Enough budget to be charged for, not enough to be useful. The
+            # floor is a lease length, so it is checked against the lease this
+            # group would actually get: n nodes spend the remaining node-seconds
+            # n times as fast, and comparing the raw budget instead handed a
+            # two-node group half the floor -- billable, and gone before it had
+            # finished booting. api.start's own refusal message and
+            # `admin.py sessions` have always quoted the multiplied figure.
+            return False, "exhausted", row
+
+        expires = min(expires_cap, now() + lease)
 
         cx.execute(
             "INSERT INTO sessions"
@@ -305,7 +314,8 @@ def claim(group_id, assignment_id, session_id, student_id, expires_cap, quota_se
             "   started_by = excluded.started_by,"
             "   node_count = excluded.node_count,"
             "   starts_used = sessions.starts_used + 1,"
-            "   host = NULL, nodes = NULL, private_key = NULL, last_error = NULL",
+            "   instance_id = NULL, host = NULL, nodes = NULL,"
+            "   private_key = NULL, last_error = NULL",
             (group_id, assignment_id, PROVISIONING, session_id, now(), expires, student_id,
              node_count),
         )
@@ -457,9 +467,10 @@ def set_nodes(group_id, assignment_id, nodes, status=None):
     """Record the whole cluster, optionally promoting it in the same write.
 
     The only place `nodes`, `instance_id` and `host` are *set* (`mark_stopped`
-    clears them). instance_id/host are rank 0, kept in step here rather than by
-    any caller: two independent representations of one fact is exactly how they
-    drift apart.
+    and `claim` clear all three; a row that kept a dead rank 0 would report a
+    terminated instance as this session's node). instance_id/host are rank 0,
+    kept in step here rather than by any caller: two independent
+    representations of one fact is exactly how they drift apart.
     """
     nodes = sorted(nodes, key=lambda n: n.get("rank", 0))
     head = nodes[0] if nodes else {}
@@ -542,6 +553,7 @@ def mark_stopped(group_id, assignment_id):
         assignment_id,
         status=STOPPED,
         session_id=None,
+        instance_id=None,
         host=None,
         nodes=None,
         private_key=None,

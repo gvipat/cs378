@@ -169,9 +169,12 @@ so a live session's hours are not frozen at the last stop. Its arithmetic must
 stay identical to `accrue_and_close`, or students watch a number they are not
 billed. Nothing that makes a decision may call it.
 
-`GPULEASE_MIN_START_MINUTES` refuses a start whose remaining budget is below it,
-returning reason `"exhausted"` rather than `"quota"`. Booting costs budget, so a
-lease shorter than this is billable and useless.
+`GPULEASE_MIN_START_MINUTES` refuses a start whose *lease* would be shorter
+than it, returning reason `"exhausted"` rather than `"quota"`. Booting costs
+budget, so a lease shorter than this is billable and useless. It is compared
+against `remaining // node_count`, not against `remaining`: at two nodes a
+group needs twice the node-minutes to clear the same floor, which is the figure
+`api.start`'s refusal message and `admin.py sessions` have always quoted.
 
 **`db.set_usage()` is the instructor's budget override** (`admin.py budget`) and
 the only other thing that writes `gpu_seconds_used`. It refuses while the
