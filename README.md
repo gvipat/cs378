@@ -232,7 +232,7 @@ bound to localhost until you put Caddy in front of it in the next step:
 
 ```bash
 curl -s http://127.0.0.1:8000/healthz
-# {"ok":true,"course":"cs378","assignment":"hw1","nodes_per_group":2,
+# {"ok":true,"course":"utcs378","assignment":"hw1","nodes_per_group":2,
 #  "deadline":"2026-09-16 04:59 UTC"}
 ```
 
@@ -530,11 +530,11 @@ not the same thing.
 
 | Setting | Default | Notes |
 |---|---|---|
-| `GPULEASE_COURSE` | `cs378` | The tag on every instance, and the blast radius: the service only ever touches instances carrying it. Must match the IAM policy's `REPLACE_COURSE_TAG`. |
+| `GPULEASE_COURSE` | `cs378` | The tag on every instance, and the blast radius: the service only ever touches instances carrying it. Must match the IAM policy's `REPLACE_COURSE_TAG`. **This deployment's tag is `utcs378`**, which is what the example ships; the code default is deliberately something else so an unconfigured install cannot inherit the live blast radius. |
 | `GPULEASE_REGION` | `us-west-2` | Must be the lease host's own region. |
 | `GPULEASE_HOST` / `GPULEASE_PORT` | `127.0.0.1` / `8000` | Localhost because the API belongs behind a TLS terminator — see "Put TLS in front". Change the port and the Caddyfile's `reverse_proxy` must follow. **Changing either needs `sudo ./setup.sh`, not a restart:** both are baked into the systemd unit at install time. |
 | `GPULEASE_DB` | `<repo>/var/gpulease.db` | The whole system state. |
-| `GPULEASE_AMI` | blank → latest Ubuntu 22.04 | **Stock Ubuntu has no NVIDIA driver.** Set a golden image for real GPU work; see below. Cached in-process, so restart after changing. |
+| `GPULEASE_AMI` | blank → latest Ubuntu 22.04 | **Stock Ubuntu has no NVIDIA driver.** Set a golden image for real GPU work; see below for the two DLAMI variants and how to look up current ids. Cached in-process, so restart after changing. |
 | `GPULEASE_INSTANCE_TYPE` | `t3.micro` | The example ships `g4dn.xlarge`. The code default is a cheap smoke-test type on purpose — a typo should not launch a GPU fleet. |
 | `GPULEASE_ROOT_GB` | `30` | Must be ≥ the AMI's own root snapshot, or every `RunInstances` fails with `InvalidBlockDeviceMapping`. The example ships `100` for the DL AMIs. |
 | `GPULEASE_SUBNET_IDS` | blank → public subnets of the VPC | Tried in order on capacity errors. Must be in one VPC; spanning two is rejected at startup. Sets the VPC the security groups are created in. |
@@ -838,14 +838,14 @@ Three things about it are deliberate and worth not undoing:
   come back without `./admin.py grant`. Do not rely on the token mismatch to
   save you; export the variable.
 
-- **It uses a different `GPULEASE_COURSE` (`cs378-test`).** That tag is the
+- **It uses a different `GPULEASE_COURSE` (`utcs378-test`).** That tag is the
   blast radius for every describe, stop and terminate. Sharing it with the live
   deployment would let a test run's `admin.py terminate`, or a deliberately
   passed deadline, destroy real students' disks. The price is that the host's
   IAM role must allow both tags — `StringEquals` takes a list:
 
   ```bash
-  sed 's/"REPLACE_COURSE_TAG"/["cs378","cs378-test"]/' iam-policy.json \
+  sed 's/"REPLACE_COURSE_TAG"/["utcs378","utcs378-test"]/' iam-policy.json \
     > /tmp/gpulease-policy.json
   aws iam put-role-policy --role-name gpulease-host \
     --policy-name gpulease --policy-document file:///tmp/gpulease-policy.json
@@ -857,7 +857,7 @@ Three things about it are deliberate and worth not undoing:
 
   Skip it and `./admin.py preflight` fails at **security group**, not at
   `RunInstances`: the first thing the test config asks for is a security group
-  tagged `Course=cs378-test`, and `CreateSecurityGroup` is conditioned on
+  tagged `Course=utcs378-test`, and `CreateSecurityGroup` is conditioned on
   `aws:RequestTag/Course` like everything else. The message reads "no
   identity-based policy allows the ec2:CreateSecurityGroup action", which sounds
   like a missing permission and is really a tag that does not match.
@@ -997,25 +997,54 @@ With `GPULEASE_NODES_PER_GROUP` above 1, also:
   (stock Ubuntu) has no NVIDIA driver, and installing one on first boot is slow
   enough that students will think it is broken. On a GPU instance type it is
   worse than slow: with no `nvidia-smi` the boot script counts zero GPUs and
-  every job fails. Use the Deep Learning Base OSS Nvidia Driver GPU AMI
-  (Ubuntu 22.04, owner `amazon`), or the PyTorch DLAMI if you want torch and
-  NCCL preinstalled. This prints the current id and the root size to use as the
-  floor for `GPULEASE_ROOT_GB`:
+  every job fails. Two `amazon`-owned Ubuntu 22.04 DLAMIs have the driver baked
+  in, and the choice between them is a choice about CUDA:
+
+  | Image | Snapshot | CUDA |
+  |---|---|---|
+  | Deep Learning Base AMI with Single CUDA | 35 GB | one toolkit (13.2 as of 2026-09) |
+  | Deep Learning Base OSS Nvidia Driver GPU AMI | 75 GB | four side by side, `/usr/local/cuda-12.6`…`-13.0`, default 12.9 |
+
+  The single-CUDA image is the cheaper one to run — 40 GB less per volume,
+  times `groups x NODES_PER_GROUP` volumes standing until you terminate — and
+  for kernel work `nvcc` plus a profiler is the whole requirement. Take the
+  four-toolkit image instead when an assignment needs a 12.x toolchain or a
+  cu12 torch wheel, since the single-CUDA one has no `/usr/local/cuda-12.x` to
+  fall back on. The PyTorch DLAMI adds torch and NCCL on top of either. Note
+  that CUDA 13 dropped Maxwell, Pascal and Volta but **not** Turing, so a T4
+  (`g4dn`, `sm_75`) is fine on both.
+
+  These print the current ids and the root sizes to use as the floor for
+  `GPULEASE_ROOT_GB`:
 
   ```bash
-  aws ec2 describe-images --region $REGION --owners amazon \
-    --filters 'Name=name,Values=Deep Learning Base OSS Nvidia Driver GPU AMI (Ubuntu 22.04)*' \
-              'Name=state,Values=available' \
-    --query 'sort_by(Images,&CreationDate)[-1].[ImageId,Name,BlockDeviceMappings[0].Ebs.VolumeSize]'
+  for NAME in 'Deep Learning Base AMI with Single CUDA (Ubuntu 22.04)' \
+              'Deep Learning Base OSS Nvidia Driver GPU AMI (Ubuntu 22.04)'; do
+    aws ec2 describe-images --region $REGION --owners amazon \
+      --filters "Name=name,Values=$NAME*" 'Name=state,Values=available' \
+      --query 'sort_by(Images,&CreationDate)[-1].[ImageId,Name,BlockDeviceMappings[0].Ebs.VolumeSize]' \
+      --output text
+  done
+  ```
+
+  AWS also publishes the latest id of each as a public SSM parameter, which is
+  the better thing to read at deploy time than an id pasted into
+  `gpulease.env` months ago:
+
+  ```bash
+  aws ssm get-parameter --region $REGION --output text --query Parameter.Value \
+    --name /aws/service/deeplearning/ami/x86_64/base-with-single-cuda-ubuntu-22.04/latest/ami-id
   ```
 
   The id is cached in the running process, so `sudo systemctl restart gpulease`
   after changing it.
 - **`GPULEASE_ROOT_GB` must be at least the AMI's own root snapshot size.** The
   launch passes `VolumeSize` explicitly, so a smaller value fails every
-  `RunInstances` with `InvalidBlockDeviceMapping`. The DL AMIs are far larger
-  than the old 30 GB default; read the size out of `describe-images` and use it
-  as the floor.
+  `RunInstances` with `InvalidBlockDeviceMapping`. Both DL AMIs are larger than
+  the 30 GB default — 35 GB and 75 GB respectively — so read the size out of
+  `describe-images` and use it as the floor. Switching from the four-toolkit
+  image to the single-CUDA one does not need this changed; switching back does,
+  before the AMI, or every launch fails.
 - **Cost.** A stopped instance still bills for its EBS volume, and a public
   IPv4 address bills whether or not the instance is running — multiplied by
   `GPULEASE_NODES_PER_GROUP`. Set an AWS Budget.
