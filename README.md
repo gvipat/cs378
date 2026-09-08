@@ -327,10 +327,17 @@ A hang means port 80 or 443 is still closed on the host security group; a
 certificate error means DNS is not pointing here yet. `journalctl -u caddy -n
 30` says which of the two it is.
 
-**`GPULEASE_HOST` is the one setting a restart will not apply.** `setup.sh`
-bakes the bind address into the systemd unit's `ExecStart` at install time, so
-if you ever change it, re-run `sudo ./setup.sh`. `systemctl restart` alone
-leaves the old address and the change looks silently ignored.
+**`GPULEASE_HOST` and `GPULEASE_PORT` are the two settings a restart will not
+apply.** `setup.sh` bakes both into the systemd unit's `ExecStart` at install
+time, so if you ever change either, re-run `sudo ./setup.sh`. `systemctl
+restart` alone leaves the old values and the change looks silently ignored.
+
+A stale port is the one that wastes an afternoon: the service comes up healthy
+on the old number, Caddy keeps proxying to the one in its Caddyfile, and the
+only symptom is a 502 that looks like a TLS or firewall problem. If you get one,
+check `journalctl -u gpulease | grep "Uvicorn running"` against the
+`reverse_proxy` line in `/etc/caddy/Caddyfile` before you look at anything
+else.
 
 **6. Load the roster.** On the lease host — `admin.py` reads the local
 database.
@@ -525,7 +532,7 @@ not the same thing.
 |---|---|---|
 | `GPULEASE_COURSE` | `cs378` | The tag on every instance, and the blast radius: the service only ever touches instances carrying it. Must match the IAM policy's `REPLACE_COURSE_TAG`. |
 | `GPULEASE_REGION` | `us-west-2` | Must be the lease host's own region. |
-| `GPULEASE_HOST` / `GPULEASE_PORT` | `127.0.0.1` / `8000` | Localhost because the API belongs behind a TLS terminator — see "Put TLS in front". Change the port and the Caddyfile's `reverse_proxy` must follow. **Changing the host needs `sudo ./setup.sh`, not a restart:** the bind address is baked into the systemd unit at install time. |
+| `GPULEASE_HOST` / `GPULEASE_PORT` | `127.0.0.1` / `8000` | Localhost because the API belongs behind a TLS terminator — see "Put TLS in front". Change the port and the Caddyfile's `reverse_proxy` must follow. **Changing either needs `sudo ./setup.sh`, not a restart:** both are baked into the systemd unit at install time. |
 | `GPULEASE_DB` | `<repo>/var/gpulease.db` | The whole system state. |
 | `GPULEASE_AMI` | blank → latest Ubuntu 22.04 | **Stock Ubuntu has no NVIDIA driver.** Set a golden image for real GPU work; see below. Cached in-process, so restart after changing. |
 | `GPULEASE_INSTANCE_TYPE` | `t3.micro` | The example ships `g4dn.xlarge`. The code default is a cheap smoke-test type on purpose — a typo should not launch a GPU fleet. |

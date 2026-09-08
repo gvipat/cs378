@@ -69,10 +69,14 @@ Three constraints that are easy to violate and annoying to debug:
 - **The subnets must auto-assign public IPs.** `run_instances` passes a
   top-level `SubnetId`, which forbids a `NetworkInterfaces` block, so the
   instance cannot request a public IP for itself.
-- **`GPULEASE_HOST` is not applied by a restart.** `setup.sh` interpolates it
-  into the systemd unit's `ExecStart` at install time, so changing it in
-  `gpulease.env` and restarting leaves the old bind address. Re-run
-  `sudo ./setup.sh`. Every *other* setting in that file is a restart.
+- **`GPULEASE_HOST` and `GPULEASE_PORT` are not applied by a restart.**
+  `setup.sh` interpolates *both* into the systemd unit's `ExecStart` at install
+  time, so changing either in `gpulease.env` and restarting leaves the old
+  value. Re-run `sudo ./setup.sh`. Every *other* setting in that file is a
+  restart. The port is the nastier of the two: a stale bind address usually
+  fails loudly, while a stale port leaves the service healthy on one number and
+  Caddy proxying to another, which surfaces only as a 502 with no clue in
+  either service's log as to which end is wrong.
 - **Capacity has to exist for a group's whole cluster in one AZ.** All of a
   group's nodes come from one `RunInstances` with `MinCount == MaxCount`, so a
   subnet that can place one but not two fails and we move to the next.
@@ -94,7 +98,7 @@ python -m gpulease.db init
 
 # On the lease host
 sudo ./setup.sh                     # install or re-install after a git pull
-sudo systemctl restart gpulease     # after editing gpulease.env (except GPULEASE_HOST)
+sudo systemctl restart gpulease     # after editing gpulease.env (except HOST/PORT)
 journalctl -u gpulease -f
 
 ./admin.py roster roster.csv        # mint tokens -> tokens.csv
