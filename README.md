@@ -840,10 +840,20 @@ Three things about it are deliberate and worth not undoing:
   ```bash
   sed 's/"REPLACE_COURSE_TAG"/["cs378","cs378-test"]/' iam-policy.json \
     > /tmp/gpulease-policy.json
+  aws iam put-role-policy --role-name gpulease-host \
+    --policy-name gpulease --policy-document file:///tmp/gpulease-policy.json
   ```
 
-  Skip that and `RunInstances` is denied under the test config, which
-  `./admin.py preflight` will tell you.
+  Run that from your laptop — the host's role cannot edit its own policy. The
+  same `--policy-name` overwrites in place and takes effect on the next call, so
+  there is nothing to restart.
+
+  Skip it and `./admin.py preflight` fails at **security group**, not at
+  `RunInstances`: the first thing the test config asks for is a security group
+  tagged `Course=cs378-test`, and `CreateSecurityGroup` is conditioned on
+  `aws:RequestTag/Course` like everything else. The message reads "no
+  identity-based policy allows the ec2:CreateSecurityGroup action", which sounds
+  like a missing permission and is really a tag that does not match.
 - **`GPULEASE_GPU_HOUR_QUOTA=0.05`** — three node-minutes, a 90-second lease at
   two nodes. That is exactly what item 6 checks, and it will cut every *other*
   test short. Raise it to `0.5` while you work through the rest.
