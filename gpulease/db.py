@@ -28,6 +28,11 @@ from . import config
 #      +------------- STOPPING <-------- stop / reaper -------+
 #
 # STOPPED and FAILED are the only states a new start is allowed from.
+#
+# STOPPED means "this group has no instances", not "this group has instances
+# that are switched off": the instances are terminated on the way out, so a
+# start from here is a fresh cluster rather than a resume. The name is kept
+# because it is what students, the CLI and every existing row already say.
 
 STOPPED = "STOPPED"
 PROVISIONING = "PROVISIONING"
@@ -244,19 +249,22 @@ def claim(group_id, assignment_id, session_id, student_id, expires_cap, quota_se
           max_starts, node_count=1, min_start_seconds=0):
     """Try to take the group's session slot for a new launch.
 
-    One transaction does five jobs: it enforces the per-assignment start limit
-    and the GPU-hour budget, it decides how long this session's lease may be,
-    it stops a second group member from launching a duplicate instance, and it
-    claims the session. All of it has to be decided against the same snapshot,
-    or two simultaneous requests could each conclude they were the group's one
-    allowed start.
+    One transaction does five jobs: it enforces the GPU-hour budget and any
+    start limit an instructor has set, it decides how long this session's lease
+    may be, it stops a second group member from launching a duplicate cluster,
+    and it claims the session. All of it has to be decided against the same
+    snapshot, or two simultaneous requests could each conclude the group had
+    budget for a session and launch one apiece.
+
+    The budget check here is the whole of "you are out of hours": groups may
+    start as often as they like, and this is what eventually says no. A group
+    whose usage has reached the quota gets "quota" and no instances.
 
     `expires_cap` is the latest this lease may end for reasons that are not the
     budget -- MAX_SESSION_HOURS, and the deadline. The budget shortens it
     further: a group with forty minutes of node-hours left gets a forty-minute
-    lease, and the reaper's ordinary "lease expired" path is then what enforces
-    the budget. That is the whole of budget enforcement; nothing accrues
-    mid-session and no reaper case knows about the quota.
+    lease, and the reaper's ordinary "lease expired" path is then what ends it.
+    Nothing accrues mid-session and no reaper case knows about the quota.
 
     Returns (ok, reason, row) where reason is
     "" | "live" | "spent" | "quota" | "exhausted" and row is the existing
@@ -309,7 +317,10 @@ def refund_start(group_id, assignment_id):
     """Give back a start that never became a usable session.
 
     A launch that failed on capacity or a bad AMI is the system's problem, not
-    the group's, and burning their one lease on it would be indefensible.
+    the group's. Mostly cosmetic while starts are unlimited -- it keeps
+    `starts_used` honest as a count of sessions a group actually got -- but it
+    is load-bearing the moment an instructor sets GPULEASE_MAX_STARTS, so every
+    failure path in api.start still calls it.
     """
     with write() as cx:
         cx.execute(

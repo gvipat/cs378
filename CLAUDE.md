@@ -10,6 +10,14 @@ they stop themselves when the group stops using them. The entire control plane i
 process on one EC2 instance** — FastAPI + a SQLite file + a reaper thread —
 installed by `setup.sh`.
 
+**Instances are ephemeral.** Every start launches new ones; every way a session
+can end terminates them, and `DeleteOnTermination` takes the root volumes with
+them. Nothing of a group's persists between sessions, groups start again as
+often as they like, and `GPULEASE_GPU_HOUR_QUOTA` is the only thing rationing
+anything. If you find a claim that instances are stopped-not-terminated, that a
+session resumes a group's existing box, that student files survive a stop, or
+that `GPULEASE_MAX_STARTS` is the ration, it is stale — fix it.
+
 An earlier version of this was Lambda + DynamoDB + Terraform. It is archived in
 `legacy-serverless.tar.gz` and is **not** the current design. If you find a
 reference to Lambda, DynamoDB, Terraform, SSM parameters, launch templates, or
@@ -37,7 +45,7 @@ gpulease.env.test  t3.micro + minutes, for the manual checklist. Selected with
                 GPULEASE_ENV=gpulease.env.test, which REPLACES gpulease.env
                 rather than layering on it. Its GPULEASE_COURSE is deliberately
                 not the production one -- that tag is the blast radius for every
-                stop and terminate -- which means the host's IAM policy needs
+                describe and terminate -- which means the host's IAM policy needs
                 both tags (StringEquals takes a list). Do not "fix" the mismatch
                 by pointing it at the real course.
 var/gpulease.db the whole system state
@@ -55,9 +63,9 @@ The API binds to `127.0.0.1` and **Caddy terminates TLS in front of it**
 Only 22, 80 and 443 are open on the lease host; 8000 is not. This is not
 optional polish: `/session` returns the group's SSH *private key* in the
 response body and the CLI polls it every five seconds, so a plaintext listener
-hands an on-path observer a shell on a group's nodes and a token that can end
-another group's session. If you ever find `GPULEASE_HOST=0.0.0.0` and no
-terminator, that is the bug.
+hands an on-path observer a shell on a group's nodes and a token that can
+destroy another group's nodes and everything on their disks. If you ever find
+`GPULEASE_HOST=0.0.0.0` and no terminator, that is the bug.
 
 Three constraints that are easy to violate and annoying to debug:
 
@@ -105,11 +113,11 @@ journalctl -u gpulease -f
 ./admin.py sessions                 # database view
 ./admin.py instances                # EC2 view
 ./admin.py reap                     # one reconciliation pass
-./admin.py kill --group 7
+./admin.py kill --group 7           # end a live session now; terminates
 ./admin.py disable abc123           # revoke one token; `enable` restores it
 ./admin.py budget 7 --hours 0       # reset a group's used node-hours
-./admin.py grant 7                  # give a group another start
-./admin.py terminate                # destroy instances AND disks; irreversible
+./admin.py grant 7                  # only meaningful if MAX_STARTS is set
+./admin.py terminate                # sweep up leftovers; irreversible
 ./admin.py preflight                # check the host's IAM permissions
 
 curl -s localhost:8000/healthz      # on the host; the API binds to localhost
@@ -120,12 +128,11 @@ GPULEASE_API=https://host python3 cli/gpulease.py login <token> | start | status
 ```
 
 **There is no automated test suite.** `README.md` → "Verifying a deployment" is
-the manual checklist: concurrent start, start-limit and quota exhaustion,
-reaper idempotency, orphan cleanup, deadline enforcement, budget exhaustion and
-the budget-capped lease, termination after the deadline (including that a
-*stopped* instance is reclaimed), resume-with-a-new-key, readiness timing, and
-the multi-node cases (one subnet, peers over IMDS, cross-group isolation,
-partial cluster).
+the manual checklist: concurrent start, quota exhaustion, reaper idempotency,
+orphan cleanup, reclaiming a *stopped* instance, deadline enforcement, budget
+exhaustion and the budget-capped lease, that a stop really destroys the nodes
+and the next start builds new ones, readiness timing, and the multi-node cases
+(one subnet, peers over IMDS, cross-group isolation, partial cluster).
 
 ## Invariants worth preserving
 
@@ -138,13 +145,13 @@ of increasing spend — it has no launch path. It is level-triggered and every
 action is idempotent, so a missed, crashed or duplicated pass all converge.
 
 **`db.claim()` is the load-bearing function.** One `BEGIN IMMEDIATE`
-transaction enforces the per-assignment start limit and the GPU-hour budget,
-decides how long the lease may be, blocks a duplicate launch by a second group
-member, records how many nodes the session gets, and claims the session. All
-of it must be decided against one snapshot — two simultaneous requests each
-concluding they were the group's one allowed start is exactly the bug this
-prevents. The race loser gets the existing session (200, not an error). This is
-the most likely place for a real concurrency bug.
+transaction enforces the GPU-hour budget and any start limit, decides how long
+the lease may be, blocks a duplicate launch by a second group member, records
+how many nodes the session gets, and claims the session. All of it must be
+decided against one snapshot — two simultaneous requests each concluding the
+group had budget for a session, and launching one apiece, is exactly the bug
+this prevents. The race loser gets the existing session (200, not an error).
+This is the most likely place for a real concurrency bug.
 
 **The hour budget is enforced by the lease, not by a reaper case.** `claim()`
 stores `expires_at = min(expires_cap, now + remaining // node_count)`, so a
@@ -171,12 +178,15 @@ the only other thing that writes `gpu_seconds_used`. It refuses while the
 session is LIVE, because `accrue_and_close` is about to add that session's time
 to whatever it finds and would undo the correction.
 
-**`GPULEASE_MAX_STARTS` rations starts per `(group, assignment)`**, default 1.
-`starts_used` increments inside `claim()`; `db.refund_start()` gives it back on
-every launch-failure path in `api.start`, because a group must not lose its one
-lease to a capacity error. If you add a new failure path there, refund on it
-too. `admin.py grant` is the instructor override, and it is not optional
-tooling — with a hard limit, groups will need it.
+**`GPULEASE_MAX_STARTS` is an optional cap on top of the budget**, default 0 =
+unlimited. Sessions are disposable, so a group that loses one to a capacity
+error or a mistaken `stop` simply starts again; the hour budget is what
+eventually says no. `starts_used` still increments inside `claim()` and
+`db.refund_start()` still gives it back on every launch-failure path in
+`api.start` — mostly so the counter means "sessions this group actually got",
+but load-bearing the moment somebody sets a limit, so refund on any new failure
+path you add. `admin.py grant` is the override when a limit is set;
+`admin.py budget` is the one you actually reach for.
 
 **`db.init()` runs `_migrate()`.** `CREATE TABLE IF NOT EXISTS` does nothing to
 an existing table, so every added column needs a line there. There are live
@@ -188,13 +198,13 @@ AWS CLI on the box. Three mechanisms make that possible, and all are easy to
 break by accident:
 
 - The session public key travels in cloud-init user-data, inside `bootcmd` —
-  the one cloud-init module with `ALWAYS` frequency. That is why the control
-  plane can rewrite a *stopped* instance's user-data and have a *resumed*
-  instance accept a *fresh* key. Do not move that payload to `runcmd` or
-  `write_files`; they are per-instance and will silently stop re-running.
-- Instances launch with `InstanceInitiatedShutdownBehavior=stop`, so an
-  OS-level shutdown stops rather than terminates the instance and keeps the
-  root volume.
+  the one cloud-init module with `ALWAYS` frequency. Every instance is new, so
+  the first boot is the one that matters and a per-instance module would now do;
+  `bootcmd` stays because it also restores the key and the peer files after a
+  student reboots mid-session. Keep it there.
+- Instances launch with `InstanceInitiatedShutdownBehavior=terminate`, so a
+  student's `sudo poweroff` destroys their own node rather than leaving a
+  stopped one billing for a volume nothing will ever read. They start again.
 - The peer list reaches the box as *instance tags read over IMDS*, which needs
   no credential. See the multi-node invariants below.
 
@@ -213,12 +223,13 @@ home; the peer data comes from link-local IMDS, not from the control plane. So:
   it multiplies is the *bill*: the worst case is
   `groups x nodes x hours x $/hour`, so raising the node count raises the bill
   by exactly that factor with no change to how long a lease lasts.
-- **`GPULEASE_GPU_HOUR_QUOTA` is the hour budget, and it is inert when
-  `MAX_STARTS=1`** — it is only consulted when a group starts, and a group that
-  may start once is only ever checked once. Do not present it as a live cost
-  control in that config. It is counted in node-hours, and
-  `gpulease.env.example` ships `MAX_STARTS=0` with a 60-hour budget, which is
-  the configuration where it is the ration.
+- **`GPULEASE_GPU_HOUR_QUOTA` is the hour budget and the ration.** Starts are
+  unlimited by default, so this is the only thing that ever refuses a group.
+  It is counted in node-hours, which is why the worst case for the course is
+  `groups x QUOTA x $/hour` with no node factor — a second node makes a group
+  spend the budget twice as fast, not spend twice as much of it. It goes inert
+  only if somebody sets `MAX_STARTS=1`, where a group that may start once is
+  checked once; do not present it as a live control in that config.
 
 **`bootcmd` runs before cloud-init's `users-groups` module**, so on a *first*
 boot the `ubuntu` user does not exist yet — hence the `id -u ubuntu` guard, with
@@ -237,31 +248,33 @@ the probe arrives from the private address. It also **revokes** tcp/22 IPv4
 rules that are no longer in `GPULEASE_ALLOWED_SSH_CIDRS`, so narrowing that
 setting actually closes the old range. Keep the reconcile; add-only was a bug.
 
-**The service terminates only after the deadline, and only if asked.** For the
-life of an assignment instances are stopped and never terminated: the root EBS
-volume is the only persistence students get, and nothing reachable from a
-student request may destroy their work. `iam-policy.json` does carry
-`ec2:TerminateInstances`, in its own `TerminateAfterDeadline` statement scoped
-on `ec2:ResourceTag/Course`, but the only caller is
-`reaper._sweep_terminate()` and it is gated three ways: `GPULEASE_DEADLINE` must
-have passed, plus `GPULEASE_TERMINATE_GRACE_HOURS` on top of it, with
-`GPULEASE_TERMINATE_AT_DEADLINE` on — and that setting defaults *off* in
-`config.py` while `gpulease.env.example` ships it on, the same deliberate
-mismatch as `t3.micro`/`g4dn.xlarge`. The grace period is there because
-`GPULEASE_DEADLINE` is parsed at import from a file that ships with a real date
-in it: a mistyped deadline should cost a day of stopped instances, not every
-group's work. Do not widen any of that to make cleanup convenient; the
-on-demand path is `admin.py terminate`, which makes a human type the course tag.
+**Terminating is how every session ends, and `aws.terminate_instances()` is the
+only disposal primitive.** There is no `stop_instances`; do not add one back.
+`api.stop`, all six reaper cases, the deadline sweep, `admin.py kill` and
+`admin.py terminate` all go through it, and `DeleteOnTermination` takes the root
+volume every time. A stopped instance is the failure mode this design exists to
+prevent: it bills for a disk that the group's next start — which launches fresh
+nodes — will never look at.
 
-`_sweep_terminate()` re-describes with `STATES_ALL` rather than reusing the
-list `run_once()` passes the deadline sweep, which holds only pending and
-running instances. The volumes worth reclaiming belong to the *stopped* ones.
+That is why `iam-policy.json` no longer carries `ec2:StartInstances`,
+`ec2:StopInstances`, `ec2:ModifyInstanceAttribute` or
+`ec2:ModifyInstanceMetadataOptions`. All four existed for the resume path.
+`ec2:TerminateInstances` is scoped on `ec2:ResourceTag/Course` like everything
+else, and is now a routine permission rather than a guarded one.
+
+**Reaper case (6) terminates anything found `stopped` or `stopping`.** Nothing
+in the system creates a stopped instance, so one has been stopped by hand or
+shut down from inside a box predating `InstanceInitiatedShutdownBehavior=
+terminate` — either way it is a volume nobody will ever read again. `run_once()`
+makes one `STATES_ALL` describe and splits it: pending/running drive the session
+logic, stopping/stopped go to case (6). Do not narrow that describe back to
+pending+running; the stopped ones would then be invisible and bill forever.
 
 **`aws.describe_many()` falls back to describing one at a time.** A single
 unknown instance id fails the whole `DescribeInstances` batch, so a node that
 has been terminated behind the service's back would otherwise hide the rest of
 its cluster — which is still running and still billing, and which the reaper
-needs to see to stop. Keep the fallback.
+needs to see in order to destroy. Keep the fallback.
 
 **Files that hold credentials are created `0600` at `os.open` time**, never
 opened-then-chmod'ed: `var/gpulease.db`, `tokens.csv`, the CLI's saved token,
@@ -269,14 +282,16 @@ and the CLI's session key. The window in between is enough to leak on a shared
 lab machine.
 
 **`run_instances` passes a `ClientToken`** so a timed-out-then-retried launch
-cannot bill for two instances. It is per subnet attempt, because reusing one
-across a genuine cross-AZ retry is an `IdempotentParameterMismatch`. The resume
-path's top-up launch salts it for the same reason: it is a second, different
-`RunInstances` under the same session id.
+cannot bill for two clusters. It is `{session_id}-{subnet attempt}`: per
+attempt, because reusing one across a genuine cross-AZ retry is an
+`IdempotentParameterMismatch`, and safe across sessions because `session_id` is
+new for every start. If you ever add a second `RunInstances` under one session,
+it needs its own salt.
 
-**IAM scoping in `iam-policy.json`**: every start/stop/tag action is conditioned
-on `ec2:ResourceTag/Course`, and `RunInstances` on `aws:RequestTag/Course`, so
-nothing this service creates can escape the scope of what it may destroy.
+**IAM scoping in `iam-policy.json`**: every terminate and tag action is
+conditioned on `ec2:ResourceTag/Course`, and `RunInstances` on
+`aws:RequestTag/Course`, so nothing this service creates can escape the scope of
+what it may destroy.
 
 **`GPULEASE_DEADLINE` is parsed at import, not on use.** A malformed value is
 a `SystemExit` at boot rather than a cost control that silently never fires,
@@ -284,50 +299,43 @@ and a value with no UTC offset is read as UTC — which a syllabus date almost
 never is. Consequences: it is a restart to change, and
 `gpulease.env.example` ships it **blank** on purpose. `setup.sh` copies that
 file to `gpulease.env` when there is none and then starts the service on it, so
-a date filled in there is live on first boot — and since the example also ships
-`GPULEASE_TERMINATE_AT_DEADLINE=1`, it would be a date on which every root
-volume tagged for the course is destroyed. The blank is what breaks that chain
-(`TERMINATE_AT` is 0 without a deadline, and `_sweep_terminate` returns
-immediately). Do not "helpfully" fill it in; stamp it at deploy time.
+a date filled in there is live on first boot — and a wrong one is a date on
+which every group's session ends and no new one may start. Do not "helpfully"
+fill it in; stamp it at deploy time.
 
 **`GPULEASE_DEADLINE` is enforced in three places, and needs all three.**
 `api.start` refuses new sessions past it *and* caps `expires_at` so no lease
-outlives it; `reaper._sweep_deadline()` stops everything tagged for the course
-once it passes. The sweep is not redundant with the cap: sessions already
+outlives it; `reaper._sweep_deadline()` terminates everything tagged for the
+course once it passes. The sweep is not redundant with the cap: sessions already
 running when the deadline was configured have an uncapped `expires_at`, and it
 works off EC2 rather than the session table because an instance whose row was
-lost still costs money. The sweep itself only ever *stops*; terminating is a
-separate, later, opt-in step in `_sweep_terminate()` — see "The service
-terminates only after the deadline" above.
+lost still costs money. It is handed the full `STATES_ALL` describe, so a
+stopped leftover goes with the rest.
 
 **A group's nodes come from ONE `run_instances` call**, `MinCount == MaxCount
 == n`. That single call is what guarantees they share a subnet and an AZ, and
 it makes the launch all-or-nothing. Do not turn it into a loop of single
 launches to "improve" capacity handling: the nodes would scatter across AZs
 (cross-AZ traffic is billed per GB, and an all-reduce moves a lot of GB), and a
-partial launch would bill for instances that cannot run the job. The resume
-path may top up a short cluster, and when it does it pins the new nodes to the
-existing nodes' subnet for the same reason.
+partial launch would bill for instances that cannot run the job. There is now
+exactly one `RunInstances` per session — no top-up path — so this is the only
+place a node is ever created.
 
 **Nodes learn about each other through IMDS tags, not credentials.** After
-launch, `aws.launch_or_resume` tags each instance with `NodeIndex` and
+launch, `aws.launch_cluster` tags each instance with `NodeIndex` and
 `NodePeers`, and instances launch with `InstanceMetadataTags: enabled` so
 `bootcmd` can read them back over link-local. This is what keeps "student
 instances hold no AWS credentials" true while still giving them a peer list.
 Do not replace it with a call back to the control plane, an instance profile,
-or an agent. Two consequences worth remembering:
-
-- The tags land a moment *after* `RunInstances` returns, so a first boot can
-  lose the race. The boot script retries for ~40s and treats a miss as
-  non-fatal. On a resume the tags are already there.
-- `iam-policy.json` needs `ec2:ModifyInstanceMetadataOptions`, because an
-  instance created before multi-node has tags-in-IMDS switched off and the
-  resume path turns it on.
+or an agent. One consequence worth remembering: the tags land a moment *after*
+`RunInstances` returns, so a boot can lose the race — and every boot is a first
+boot now, since nothing is ever resumed. The boot script retries for ~40s and
+treats a miss as non-fatal.
 
 **Every node gets identical user-data**, so one session key opens the whole
 cluster and `ssh -A` hops between them. Do not personalise the payload per
-node — rank comes from IMDS at boot, and per-node user-data would mean the
-resume path has to rewrite each one differently.
+node — rank comes from IMDS at boot, and identical payloads are what let a
+single `RunInstances` produce the whole cluster.
 
 **`{course}-cluster-{group}` is one security group per group**, allowing all
 traffic from itself; `{course}-instances` still carries only ssh. Do not merge
@@ -349,12 +357,13 @@ launching elsewhere fails every launch. Subnets spanning two VPCs is rejected
 outright — a group's nodes must share a subnet, so a set we cannot reason about
 as one network is a config error.
 
-**The reaper stops a partial cluster.** `len(running) < row["node_count"]`
-after the grace period means stop the survivors and close the session. A
+**The reaper destroys a partial cluster.** `len(running) < row["node_count"]`
+after the grace period means terminate the survivors and close the session. A
 two-node all-reduce with one node hangs rather than running slowly, so the
 survivor bills in full for nothing. `db.node_count(row)` reads the row, never
-config: a group mid-session keeps the cluster it was given. `admin.py grant` is
-the way back in, and under `MAX_STARTS=1` it will be needed.
+config: a group mid-session keeps the cluster it was given. The way back in is
+simply `gpulease start`, which builds a new cluster; refund the hours with
+`admin.py budget` if the failure was not theirs.
 
 **Billing is node-seconds.** `db.accrue_and_close` multiplies elapsed wall
 clock by the row's `node_count` before adding to `gpu_seconds_used`, and
@@ -370,19 +379,21 @@ why the migration adds columns without rewriting any data.
 **Config lives server-side.** All policy (quota, lease length, active
 assignment) is in `gpulease.env`. The CLI is intentionally dumb;
 `MIN_CLI_VERSION` + the `X-CLI-Version` header force an upgrade only when
-genuinely unavoidable — it is at 2 because a v1 CLI reads only `host` and would
-show a group one of their two nodes with no hint the other exists.
+genuinely unavoidable — v1 read only `host` and would show a group one of their
+two nodes with no hint the other exists; it is at **3** because a v2 CLI tells
+students their files survive a stop, and reassuring a group right up to the
+moment their disks are deleted is worse than making them download the new file.
 
 Every setting is tabulated in README → "Configuration reference"; keep that
 table and `gpulease.env.example` in step with `config.py` when you add one.
-Three deliberate mismatches live there and are not bugs to tidy. The code
+Two deliberate mismatches live there and are not bugs to tidy. The code
 defaults to `t3.micro` and a 30 GB root while the example ships `g4dn.xlarge`
 and 100 GB, because a missing config file should not launch a GPU fleet. For
 the same reason `COURSE` defaults to something that is *not* this deployment's
 tag (`utcs378`, which is what the example and the README walkthrough ship): an
 unconfigured install must not inherit the live course's blast radius, and since
 the host's IAM policy is scoped to the real tag it is denied at
-`CreateSecurityGroup` instead of quietly stopping real students' instances.
+`CreateSecurityGroup` instead of quietly destroying real students' instances.
 That denial reads "no identity-based policy allows the
 ec2:CreateSecurityGroup action" and is almost always a tag mismatch rather than
 a missing permission.
@@ -404,4 +415,7 @@ Three tables in `var/gpulease.db` (`db.SCHEMA`):
 
 State machine: `STOPPED → PROVISIONING → RUNNING → STOPPING → STOPPED`, plus
 `FAILED`. `STARTABLE = (STOPPED, FAILED)`; `LIVE = (PROVISIONING, RUNNING,
-STOPPING)`.
+STOPPING)`. `STOPPED` means the group has **no instances**, not instances that
+are switched off — they are terminated on the way out, so a start from there
+builds a new cluster. The name is kept because it is what students, the CLI and
+every existing row already say.

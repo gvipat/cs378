@@ -118,18 +118,25 @@ ALLOWED_SSH_CIDRS = _list("GPULEASE_ALLOWED_SSH_CIDRS", "0.0.0.0/0")
 ACTIVE_ASSIGNMENT = _str("GPULEASE_ACTIVE_ASSIGNMENT", "hw1")
 
 # Hard cutoff for the active assignment. Once it passes, no group may start,
-# every lease is capped to end no later than this, and the reaper stops
-# anything still running. Unset (blank) means no deadline.
+# every lease is capped to end no later than this, and the reaper terminates
+# anything still tagged for the course. Unset (blank) means no deadline.
 DEADLINE = _deadline("GPULEASE_DEADLINE")
 
-# The budget. Cumulative *node*-hours a group may burn on one assignment,
-# charged at stop by db.accrue_and_close and checked at start by db.claim.
-# db.claim also caps a session's expires_at at whatever is left, so the reaper's
-# ordinary "lease expired" path is what enforces the budget -- there is no
-# separate mid-session accounting anywhere.
+# The budget, and the ration: cumulative *node*-hours a group may burn on one
+# assignment, charged at stop by db.accrue_and_close and checked at start by
+# db.claim. db.claim also caps a session's expires_at at whatever is left, so
+# the reaper's ordinary "lease expired" path is what ends a session that runs
+# the budget out -- there is no separate mid-session accounting anywhere.
 #
-# It only rations anything when a group may start more than once: see
-# MAX_STARTS.
+# Groups start as many sessions as they like (MAX_STARTS defaults to unlimited
+# below); this number is the only thing that stops them. Set it with the bill
+# in mind: the worst case for the course is
+#
+#     groups x GPU_HOUR_QUOTA x $/instance-hour
+#
+# with no NODES_PER_GROUP factor -- the quota is *already* counted in
+# node-hours, so a second node makes a group spend it twice as fast rather than
+# letting them spend twice as much.
 GPU_HOUR_QUOTA = _float("GPULEASE_GPU_HOUR_QUOTA", 30)
 
 # The smallest lease worth handing out. Booting a node burns several minutes of
@@ -137,14 +144,27 @@ GPU_HOUR_QUOTA = _float("GPULEASE_GPU_HOUR_QUOTA", 30)
 # left is better told they are out than given a two-minute cluster.
 MIN_START_MINUTES = _float("GPULEASE_MIN_START_MINUTES", 15)
 
-# How many times a group may start a session for one assignment. 1 means a
-# group gets a single lease: once it ends, for any reason, they are done until
-# you move to the next assignment or run `admin.py grant`. 0 means unlimited,
-# which is the setting that makes GPU_HOUR_QUOTA the actual ration.
-MAX_STARTS = _int("GPULEASE_MAX_STARTS", 1)
+# How many times a group may start a session for one assignment. 0, the
+# default, is unlimited: a session is cheap to start and destroys itself when
+# it ends, so what a group spends is bounded by GPU_HOUR_QUOTA rather than by a
+# count of attempts. A positive number caps the attempts as well, which is a
+# blunt instrument -- a group that loses a session to a capacity error or a
+# fat-fingered `stop` needs `admin.py grant` to get back in -- but it is there
+# if you want it.
+MAX_STARTS = _int("GPULEASE_MAX_STARTS", 0)
 # With no idle watchdog on the instances, this is the only thing that bounds a
-# session's length, and so the only thing that bounds the bill. See the cost
-# arithmetic in README -> "What a session can cost you".
+# single session's length. What bounds the total bill is GPU_HOUR_QUOTA. See
+# the cost arithmetic in README -> "What a session can cost you".
+#
+# 0 means no lease cap, leaving the budget as the only bound. That is coherent
+# under MAX_STARTS=0 -- claim() already shortens a lease to the group's
+# remaining node-hours, so a session just runs until the budget is spent -- but
+# know what it gives up. This is the only thing standing between a forgotten
+# session and a group's whole quota: with nothing watching for an idle cluster,
+# a group that starts on Friday and walks away burns one lease's worth of
+# node-hours with a cap, and all of them without. Under MAX_STARTS=0 there is
+# no start left to grant them either, so the way back in is
+# `admin.py budget <group> --hours 0`.
 MAX_SESSION_HOURS = _float("GPULEASE_MAX_SESSION_HOURS", 8)
 # Per *node*. The old name meant the same thing back when a group got one box;
 # it is still honoured so an existing gpulease.env keeps working.
@@ -168,31 +188,28 @@ if not 1 <= NODES_PER_GROUP <= MAX_NODES_PER_GROUP:
 # default; only worth changing if something else on the image wants it.
 MASTER_PORT = _int("GPULEASE_MASTER_PORT", 29500)
 
-# --- reclaiming disks after the deadline -----------------------------------
-# Instances are stopped for the life of an assignment, because the root volume
-# is the only persistence students get. Once the assignment is over those
-# volumes are pure cost -- 30 groups x 2 nodes x 100 GB is several hundred
-# dollars a month -- so the reaper may destroy them, but only after the
-# deadline and only if you ask for it.
-#
-# Default OFF here and ON in gpulease.env.example, the same deliberate mismatch
-# as t3.micro vs g4dn.xlarge: a missing config file should not destroy data for
-# the same reason it should not launch a GPU fleet. Note that DEADLINE is
-# parsed at import and the example ships a real date, so an install that takes
-# the example verbatim inherits both a deadline and this behaviour.
-TERMINATE_AT_DEADLINE = _str("GPULEASE_TERMINATE_AT_DEADLINE", "0") in ("1", "yes", "true")
-# Breathing room between "stop everything" and "destroy the volumes". This is a
-# window for the *instructor* to notice a mistyped deadline, not for students:
-# once the deadline passes nobody can start a session, and a stopped instance
-# cannot be sshed into. Warn students before the cutoff, not during this.
-TERMINATE_GRACE_HOURS = _float("GPULEASE_TERMINATE_GRACE_HOURS", 24)
+# There is deliberately nothing here about reclaiming disks. Instances are
+# ephemeral: a session's nodes are terminated when it ends, by any route, and
+# their root volumes go with them (DeleteOnTermination). Nothing accumulates
+# between sessions, so there is no end-of-assignment cleanup to schedule and no
+# GPULEASE_TERMINATE_AT_DEADLINE / _GRACE_HOURS to get wrong. If either name is
+# still in your gpulease.env it is now ignored; delete the lines.
 
-MAX_SESSION_SECONDS = int(MAX_SESSION_HOURS * 3600)
+# A lease cap of 0 is "no cap": ten years stands in for never, which keeps this
+# an ordinary integer everywhere it is used and needs no special case at either
+# call site. api.start adds it to now() for the cap it hands claim(), which
+# then takes the min with the remaining budget; _ends_because() adds it to
+# started_at to name whichever cap bound the session, and against a lease end a
+# decade out the budget always wins -- which is the truth when there is no cap.
+#
+# Compared against the *hours*, not the seconds: a positive value that rounds
+# down to zero seconds is a mistyped lease, not a request for an unlimited one.
+NO_LEASE_CAP_SECONDS = 10 * 365 * 24 * 3600
+MAX_SESSION_SECONDS = (
+    NO_LEASE_CAP_SECONDS if MAX_SESSION_HOURS <= 0 else int(MAX_SESSION_HOURS * 3600)
+)
 QUOTA_SECONDS = int(GPU_HOUR_QUOTA * 3600)
 MIN_START_SECONDS = int(MIN_START_MINUTES * 60)
-# 0 when there is no deadline, which is also the "never terminate" case: the
-# reaper checks TERMINATE_AT_DEADLINE and a live DEADLINE before using this.
-TERMINATE_AT = DEADLINE + int(TERMINATE_GRACE_HOURS * 3600) if DEADLINE else 0
 
 # --- reaper ---------------------------------------------------------------
 REAPER_ENABLED = _str("GPULEASE_REAPER", "1") not in ("0", "no", "false")

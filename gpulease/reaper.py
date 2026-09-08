@@ -5,24 +5,32 @@ actually is (EC2) and the world as we believe it to be (SQLite) and drives one
 toward the other. Every action is idempotent, so a missed run, a crashed run or
 a duplicate run all converge to the same place.
 
-Five cases:
+Six cases:
 
-  1. session expired, instances running      -> stop them
-  2. instances running, no live session      -> orphan, stop them
-  3. session live, instances gone or stopped -> bookkeeping was wrong, fix it
-  4. session PROVISIONING for far too long   -> launch wedged, tear it down
-  5. some of a group's nodes running, not all -> broken cluster, stop the rest
+  1. session expired, instances running       -> terminate them
+  2. instances running, no live session       -> orphan, terminate them
+  3. session live, instances gone             -> bookkeeping was wrong, fix it
+  4. session PROVISIONING for far too long    -> launch wedged, tear it down
+  5. some of a group's nodes running, not all -> broken cluster, kill the rest
+  6. anything stopped rather than terminated  -> reclaim the root volume
 
 Plus one that overrides all of them: once GPULEASE_DEADLINE passes, everything
-tagged for the course gets stopped, whatever the database believes. A grace
-period after that, and only with GPULEASE_TERMINATE_AT_DEADLINE on, the
-stopped instances are terminated to reclaim their volumes.
+tagged for the course is terminated, whatever the database believes.
 
-Note what is *not* here: the GPU-hour budget. `db.claim` caps a new session's
-expires_at at whatever node-hours the group has left, so a group that is nearly
-out simply gets a short lease and case (1) ends it. Budget enforcement is that
-cap plus `db.accrue_and_close`; nothing accrues mid-session and no case below
-reads the quota.
+Everything here terminates; nothing stops. Instances are ephemeral -- a start
+always launches new ones -- so an instance the reaper is disposing of will
+never be booted again, and leaving it `stopped` would only mean paying for its
+root volume until somebody noticed. That is what case (6) is for: an instance
+can still reach `stopped` without us (a student's `sudo poweroff` on a box
+launched by an older version, a hand-stop in the console), and the volume bills
+just the same.
+
+Note what is *not* here: the GPU-hour budget, which is now the only thing
+rationing anything. `db.claim` refuses a start once the budget is spent and
+caps a new session's expires_at at whatever node-hours are left, so a group
+that is nearly out simply gets a short lease and case (1) ends it. Budget
+enforcement is that check plus that cap plus `db.accrue_and_close`; nothing
+accrues mid-session and no case below reads the quota.
 
 It can only ever *reduce* spend: nothing in here starts an instance.
 """
@@ -42,10 +50,16 @@ GRACE_AFTER_START = 120  # don't call an instance missing until EC2 catches up
 
 def run_once():
     actions = []
-    instances = aws.course_instances(states=("pending", "running"))
+    # One describe covering every state, split below. The stopped ones take no
+    # part in the session logic -- a session's nodes are pending or running or
+    # they are gone -- but they are exactly what case (6) reclaims, and asking
+    # EC2 twice for the same answer would be the only other way to see them.
+    everything = aws.course_instances(states=aws.STATES_ALL)
+    instances = [i for i in everything if i["State"]["Name"] in ("pending", "running")]
+    idle = [i for i in everything if i["State"]["Name"] in ("stopping", "stopped")]
 
     if config.DEADLINE and db.now() >= config.DEADLINE:
-        return _sweep_deadline(instances)
+        return _sweep_deadline(everything)
 
     by_group = {}
     for inst in instances:
@@ -64,7 +78,9 @@ def run_once():
         running = by_group.get(gid, [])
         started = row["started_at"] or now
 
-        # (3) we think it is up, EC2 disagrees
+        # (3) we think it is up, EC2 disagrees. Under ephemeral instances this
+        # is usually a node that has genuinely gone: terminated by hand, or by
+        # a student's `sudo poweroff`. Either way the session is over.
         if not running:
             if row["status"] == db.STOPPING or started < now - GRACE_AFTER_START:
                 db.accrue_and_close(gid, aid, "instance not running")
@@ -96,7 +112,7 @@ def run_once():
                 else f"partial cluster ({len(running)}/{expected} nodes)" if partial
                 else "stop requested"
             )
-            aws.stop_instances([i["InstanceId"] for i in running], reason)
+            aws.terminate_instances([i["InstanceId"] for i in running], reason)
             db.accrue_and_close(gid, aid, reason)
             db.mark_stopped(gid, aid)
             actions.append({"group": gid, "action": "reaped", "reason": reason})
@@ -106,8 +122,20 @@ def run_once():
         if gid in live_groups:
             continue
         ids = [i["InstanceId"] for i in insts]
-        aws.stop_instances(ids, "orphan: no live session")
-        actions.append({"group": gid, "action": "orphan_stopped", "instances": ids})
+        aws.terminate_instances(ids, "orphan: no live session")
+        actions.append({"group": gid, "action": "orphan_terminated", "instances": ids})
+
+    # (6) anything stopped instead of terminated. Nothing here creates a stopped
+    # instance -- every disposal path terminates -- so one has either been
+    # stopped by hand or shut down from inside a box old enough to predate
+    # InstanceInitiatedShutdownBehavior=terminate. It cannot be resumed into a
+    # session (a start launches fresh nodes) and its root volume bills by the
+    # hour, so it is pure waste. `stopping` is included: it is on its way to the
+    # same place, and terminating from there is legal and saves a pass.
+    if idle:
+        ids = [i["InstanceId"] for i in idle]
+        aws.terminate_instances(ids, "stopped instance: nothing will ever resume it")
+        actions.append({"action": "idle_terminated", "instances": ids})
 
     # Course-tagged but ungrouped is a bug somewhere; say so loudly.
     untagged = [i["InstanceId"] for i in instances if not aws.instance_tag(i, "Group")]
@@ -120,7 +148,7 @@ def run_once():
 
 
 def _sweep_deadline(instances):
-    """The assignment is over: stop everything, believe nothing.
+    """The assignment is over: terminate everything, believe nothing.
 
     `api.start` already caps every lease at the deadline, so in the normal case
     there is nothing here to do. This exists for the sessions that were already
@@ -129,17 +157,19 @@ def _sweep_deadline(instances):
 
     Works off EC2 rather than the session table on purpose: an instance whose
     row was lost still costs money, and after the deadline nothing tagged for
-    this course has any business running.
+    this course has any business existing.
 
-    Later, and only if asked, it also reclaims the disks -- see _sweep_terminate.
+    There is no grace period and no opt-in setting any more, because there is
+    nothing left to protect: a session's disk is destroyed when the session
+    ends, so by the deadline there is no student work on any of these volumes
+    to lose. What used to be GPULEASE_TERMINATE_AT_DEADLINE plus a day of
+    grace is now what happens every time anybody stops.
     """
     actions = []
     ids = [i["InstanceId"] for i in instances]
     if ids:
-        aws.stop_instances(ids, "assignment deadline passed")
-        actions.append({"action": "deadline_stop", "instances": ids})
-
-    actions += _sweep_terminate()
+        aws.terminate_instances(ids, "assignment deadline passed")
+        actions.append({"action": "deadline_terminate", "instances": ids})
 
     for row in db.all_sessions():
         if row["status"] not in db.LIVE:
@@ -152,59 +182,6 @@ def _sweep_deadline(instances):
     if actions:
         log.info("deadline %s passed: %s", config.deadline_str(), json.dumps(actions))
     return actions
-
-
-def _sweep_terminate():
-    """Once the grace period is up too, destroy what is left. Off by default.
-
-    A stopped instance still bills for its root volume, and at 30 groups x 2
-    nodes x 100 GB that is a few hundred dollars a month for disks nobody will
-    read again. This is what reclaims them.
-
-    Two things make it deliberately hard to fire by accident, because it is the
-    only operation in the system that destroys student work:
-    GPULEASE_TERMINATE_AT_DEADLINE defaults off in config.py, and
-    GPULEASE_TERMINATE_GRACE_HOURS puts a day between "everything stopped" and
-    "the volumes are gone" -- long enough for an instructor to notice a
-    mistyped deadline.
-
-    It re-describes rather than reusing the caller's list, which only holds
-    pending and running instances: by now the interesting ones are `stopped`,
-    and they are exactly the volumes being reclaimed. STATES_ALL excludes
-    `terminated`, so repeated passes converge on an empty list and this is
-    idempotent like everything else here.
-
-    Scoped to ACTIVE_ASSIGNMENT, which is what GPULEASE_DEADLINE is a cutoff
-    for. Without that filter this destroys every volume carrying the course
-    tag, so bumping the assignment to hw2 while leaving hw1's deadline in place
-    would reclaim hw2's disks out from under a class that is still working --
-    and nothing ties those two settings together to stop you. An instance with
-    no Assignment tag is left alone for the same reason: unrecognised is not a
-    good enough reason to destroy someone's work. Old assignments' leftovers
-    are `admin.py terminate --all-assignments`, where a human types the course
-    tag first.
-    """
-    if not (config.TERMINATE_AT_DEADLINE and config.TERMINATE_AT):
-        return []
-    if db.now() < config.TERMINATE_AT:
-        return []
-
-    ids, skipped = [], []
-    for inst in aws.course_instances(states=aws.STATES_ALL):
-        if aws.instance_tag(inst, "Assignment") == config.ACTIVE_ASSIGNMENT:
-            ids.append(inst["InstanceId"])
-        else:
-            skipped.append(inst["InstanceId"])
-    if skipped:
-        log.warning(
-            "leaving %d instance(s) not tagged Assignment=%s: %s. Their volumes "
-            "still bill; reclaim them with `admin.py terminate --all-assignments`.",
-            len(skipped), config.ACTIVE_ASSIGNMENT, skipped,
-        )
-    if not ids:
-        return []
-    aws.terminate_instances(ids, "assignment over, reclaiming volumes")
-    return [{"action": "deadline_terminate", "instances": ids}]
 
 
 def run_forever(interval=None):

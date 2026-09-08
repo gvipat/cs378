@@ -31,7 +31,11 @@ import urllib.request
 
 # 2: multi-node. A version 1 client only ever displayed one host and would
 # hide half of a two-node cluster, so the server refuses it outright.
-VERSION = 2
+# 3: ephemeral nodes. A version 2 client tells students their files survive a
+# stop. They do not - a stop destroys the nodes and their disks - so the server
+# refuses it too rather than let it reassure a group on the way to deleting
+# their work.
+VERSION = 3
 API_URL = os.environ.get("GPULEASE_API", "https://utcs378-infra.duckdns.org")
 CONFIG_DIR = os.path.expanduser("~/.config/gpulease")
 CRED_FILE = os.path.join(CONFIG_DIR, "credentials")
@@ -61,6 +65,10 @@ Request and release your group's GPU nodes.
 Your group shares one lease. Whoever runs `start` first brings the nodes up;
 everyone else's `start` hands back those same nodes and the same key. `stop`
 ends the session for the whole group, so tell them before you run it.
+
+Nodes are temporary. `stop` - and the end of your lease - DESTROYS them and
+everything on their disks. `start` then gives you new, empty nodes. Keep your
+work in git, and start as many times as your gpu-hour budget allows.
 """
 
 # Printed verbatim (RawDescriptionHelpFormatter), so the alignment below is
@@ -77,6 +85,10 @@ after that:
   {PROG} start     a few minutes, then an ssh command per node
   {PROG} status    check on it any time, from anywhere
   {PROG} stop      when you are done - idle nodes bill too
+
+your nodes are temporary:
+  stop destroys them and their disks, and start gives you new empty ones.
+  Push your work to git before you stop.
 
 files this keeps on your machine:
   ~/.config/gpulease/credentials    your saved token
@@ -192,21 +204,19 @@ def show(view, key_path=None):
         print(f"               counted per node, so {count} gpu-hours per hour running")
     if view.get("deadline"):
         print(f"  deadline     {fmt_deadline(view['deadline'])}")
-        if view.get("deadline_terminates"):
-            # The one warning that has to arrive early: after the deadline the
-            # nodes are stopped and unreachable, so there is no copying
-            # anything off once it fires.
-            print("               your nodes and their DISKS are deleted after this")
-            print("               - copy anything you want to keep off before then")
-    # Only worth showing when starts are actually rationed, and worth showing
-    # loudly then: stopping is irreversible and students should know before
-    # they type it, not after.
+    # Said on every status of a live session, not once at start: this is the
+    # line that decides whether a group has their work in git when they stop.
+    if view.get("state") in ("PROVISIONING", "RUNNING"):
+        print("  NOTE: stopping destroys these nodes and their disks. Push to git first.")
+    # Only shown when an instructor has rationed starts as well as hours. The
+    # usual case is unlimited, where the gpu-hours line above is the whole
+    # story and a "sessions used" counter would just be noise.
     allowed = view.get("starts_allowed") or 0
     if allowed:
         left = max(0, allowed - view.get("starts_used", 0))
         print(f"  sessions     {view.get('starts_used', 0)} used / {allowed} allowed")
         if left == 0 and view.get("state") in ("PROVISIONING", "RUNNING", "STOPPING"):
-            print("  NOTE: this is your last session. Once you stop it, it cannot restart.")
+            print("  NOTE: this is your last session. Once you stop it, there is no next one.")
     if key_path and (nodes or view.get("host")):
         user = view.get("user", "ubuntu")
         print()
@@ -262,7 +272,8 @@ def cmd_start(args):
             print(" ready\n")
             show(view, write_key(view["group_id"], view["private_key"]))
             print("  Note: this key is valid only for this session, on every node.")
-            print("  Files in /home/ubuntu survive a stop. Push your work to git anyway.")
+            print("  These nodes are brand new and temporary. Nothing on them survives")
+            print("  a stop - clone your repo on, and push before you finish.")
             return
         if view["state"] in ("STOPPED", "FAILED"):
             die("\nthe nodes failed to come up. Try again, then ask on the course forum.")
@@ -276,18 +287,26 @@ def cmd_status(args):
 
 
 def cmd_stop(args):
-    # Under a one-session-per-assignment policy, stopping is the end, not a
-    # pause. Make the student say so out loud rather than learn it afterwards.
+    # Every stop destroys the nodes and their disks, so every stop is confirmed
+    # -- not just the last one of a rationed set, which is all the old policy
+    # asked about. A student who has not pushed their work has seconds to
+    # realise it, and the prompt is the only thing that gives them those
+    # seconds.
     if not args.yes:
         view = call("GET", "/session")
-        allowed = view.get("starts_allowed") or 0
-        if allowed and view.get("starts_used", 0) >= allowed and view.get("state") != "STOPPED":
+        if view.get("state") != "STOPPED":
             count = view.get("node_count") or 1
-            print(f"This is your group's last session for {view.get('assignment_id')}.")
-            if count > 1:
-                print(f"It stops all {count} of your nodes.")
-            print("Stopping it is permanent - 'gpulease start' will not work again.")
-            print("Your files stay on the disk, but you will not be able to reach them.")
+            noun = "node" if count == 1 else f"all {count} nodes"
+            print(f"This DESTROYS your group's {noun} and everything on their disks.")
+            print("Anything you have not pushed to git is gone for good.")
+            allowed = view.get("starts_allowed") or 0
+            if allowed and view.get("starts_used", 0) >= allowed:
+                print(f"It is also your group's last session for "
+                      f"{view.get('assignment_id')}: 'start' will not work again.")
+            else:
+                left = view.get("gpu_hours_remaining")
+                print(f"'gpulease start' will give you new, empty nodes"
+                      f"{'' if left is None else f' ({left} gpu-hours left)'}.")
             if input("Type 'stop' to confirm: ").strip() != "stop":
                 print("Left running.")
                 return
@@ -303,13 +322,15 @@ def cmd_stop(args):
     print(f"  gpu-hours used   {result.get('gpu_hours_used')} / {result.get('gpu_hours_quota')}")
     print(f"  {result.get('message')}")
 
-    # Do not exit until EC2 has actually acknowledged the stop. A stop that
-    # silently failed is a 48-hour bill.
+    # Do not exit until EC2 has actually acknowledged it. A stop that silently
+    # failed is a 48-hour bill.
     for _ in range(12):
         time.sleep(5)
         view = call("GET", "/session")
-        if view.get("instance_state") in ("stopping", "stopped") or view["state"] == "STOPPED":
-            print("  confirmed: instance is shutting down.")
+        state = view.get("instance_state")
+        if state in ("shutting-down", "terminated", "stopping", "stopped") \
+                or view["state"] == "STOPPED":
+            print("  confirmed: the nodes are being destroyed.")
             return
     print("  warning: could not confirm shutdown. Run 'gpulease status' shortly.")
 
@@ -354,7 +375,10 @@ def main():
             "If it gives up waiting, the nodes are usually still on their way up:\n"
             "run `status` a minute later.\n\n"
             "If your group already has a session, this hands you that one rather\n"
-            "than starting a second."
+            "than starting a second.\n\n"
+            "Nodes are always new and empty - there is nothing left over from your\n"
+            "last session, so expect to clone your repo and set up again. Start as\n"
+            "often as you like; each session spends gpu-hours from your budget."
         ),
     ).set_defaults(func=cmd_start)
 
@@ -373,14 +397,16 @@ def main():
 
     st = sub.add_parser(
         "stop",
-        help="shut the nodes down and stop the charges",
+        help="destroy the nodes and stop the charges",
         formatter_class=RAW,
         description=(
-            "Stop every node in your group's lease.\n\n"
-            "Your files under /home/ubuntu survive; the billing stops. This ends\n"
-            "the session for your whole group, not just for you.\n\n"
-            "If your group gets only one session for the assignment, stopping is\n"
-            "permanent and you will be asked to type 'stop' to confirm."
+            "Destroy every node in your group's lease and stop the billing.\n\n"
+            "The nodes and their disks are deleted. Anything you have not pushed\n"
+            "to git is gone - there is no undo and no copy. This ends the session\n"
+            "for your whole group, not just for you, so tell them first.\n\n"
+            "You can `start` again afterwards and get new, empty nodes, for as\n"
+            "long as your group's gpu-hour budget lasts.\n\n"
+            "You will be asked to type 'stop' to confirm."
         ),
     )
     st.add_argument(
