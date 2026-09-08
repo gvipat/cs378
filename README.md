@@ -810,14 +810,26 @@ cannot cover is anything needing a GPU: stock Ubuntu has no driver, so the boot
 script's GPU count is 0.
 
 ```bash
-export GPULEASE_ENV=gpulease.env.test   # replaces gpulease.env; does not merge
-python -m gpulease.db init              # setup.sh only ever inits the real one
-./admin.py roster test-roster.csv       # a couple of fake students, two groups
+export GPULEASE_ENV=gpulease.env.test      # replaces gpulease.env; does not merge
+export GPULEASE_API=http://127.0.0.1:8001  # EVERY CLI command below needs this
+python -m gpulease.db init                 # setup.sh only ever inits the real one
+./admin.py roster test-roster.csv          # a couple of fake students, two groups
 .venv/bin/uvicorn gpulease.api:app --port 8001
-GPULEASE_API=http://127.0.0.1:8001 python3 cli/gpulease.py login <token>
+python3 cli/gpulease.py login <token>
 ```
 
-Two things about it are deliberate and worth not undoing:
+Three things about it are deliberate and worth not undoing:
+
+- **`GPULEASE_API` is exported for the whole session, not set on one command.**
+  `cli/gpulease.py` defaults to the production host, so a checklist command run
+  without it does not fail with "connection refused" — it reaches the live
+  deployment. Whether that is a 401 or a real action then depends on which token
+  happens to be in `~/.config/gpulease/credentials`, since the CLI keeps one
+  credential file with no per-host separation and a test `login` and a
+  production `login` overwrite each other. A stray `stop` that lands on
+  production ends a real group's session, and under `MAX_STARTS=1` it does not
+  come back without `./admin.py grant`. Do not rely on the token mismatch to
+  save you; export the variable.
 
 - **It uses a different `GPULEASE_COURSE` (`cs378-test`).** That tag is the
   blast radius for every describe, stop and terminate. Sharing it with the live
