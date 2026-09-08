@@ -13,7 +13,8 @@
 #   - A real DNS name, pointed at the lease host's Elastic IP. It cannot be the
 #     EC2 public hostname: Let's Encrypt refuses to issue for
 #     *.compute.amazonaws.com, so `ec2-1-2-3-4...` will fail the challenge. A
-#     department subdomain or a cheap domain both work.
+#     department subdomain or a cheap domain both work, and so does a free
+#     duckdns.org name if you have neither -- see README -> "Put TLS in front".
 #   - Ports 80 and 443 open to your students on the host's security group. 80
 #     is not optional - it carries the ACME challenge and the redirect.
 #

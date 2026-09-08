@@ -244,9 +244,40 @@ Caddy closes that with three lines, and nothing in gpulease or the CLI has to
 change: the student CLI validates certificates through Python's default trust
 store, so an ordinary Let's Encrypt certificate just works.
 
-First point a DNS name at the Elastic IP from step 2. It cannot be the EC2
-public hostname — Let's Encrypt will not issue for `*.compute.amazonaws.com`,
-so the challenge fails. A department subdomain or a cheap domain both work.
+First point a DNS name at the Elastic IP from step 2. Three things that look
+like they should serve as one and cannot:
+
+- **The EC2 public hostname.** Let's Encrypt will not issue for
+  `*.compute.amazonaws.com` — AWS owns it and it is on the Public Suffix List —
+  so `ec2-1-2-3-4...` fails the challenge.
+- **A bare IP address.** Caddy does not request a public certificate for one; it
+  falls back to its internal CA, and the student CLI validates through Python's
+  default trust store, so it refuses the result. Telling students to skip
+  verification is worse than plain HTTP, not better: an unverified connection
+  accepts *any* certificate, so an on-path attacker presents their own and reads
+  everything while the students believe they are safe.
+- **The course's GitHub Pages URL.** Pages is static-only and cannot proxy to
+  EC2, and `username.github.io` is not a zone you can add a record to. Serving
+  `cli/gpulease.py` to students from the course page is a fine idea; the API
+  cannot live there.
+
+A department subdomain or a cheap domain both work. If you have neither and do
+not want to buy one, a free dynamic-DNS name is a real answer rather than a
+compromise — claim one at [duckdns.org](https://duckdns.org), set it to the
+Elastic IP, and Let's Encrypt issues for it exactly as it would for a domain you
+paid for:
+
+```
+cs378-lease.duckdns.org
+```
+
+No updater cron is needed, because the Elastic IP is static; the record is set
+once. Check it resolves before you touch Caddy — `dig +short <your-name>` — since
+a name that does not resolve yet and a port 80 that is still closed produce
+similar-looking failures.
+
+If you ever rebuild the lease host, that DNS record is the one piece of this
+system that lives outside the repo and has to be updated by hand.
 
 ```bash
 # Caddy is not in Ubuntu 22.04's repos; add the official one.
