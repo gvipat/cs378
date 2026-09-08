@@ -86,6 +86,14 @@ def cmd_roster(args):
 
     print(f"\n{len(issued)} token(s) issued -> {args.out}")
     print(f"{kept} student(s) already had one (use --rotate to reissue)")
+    if issued and kept:
+        # The file is rewritten, not appended to, and only the hash of a token
+        # is stored - so an earlier tokens.csv that has been overwritten is
+        # gone. Adding one student to the roster and re-running is exactly how
+        # a whole class's undistributed tokens disappear.
+        print(f"\nNOTE: {args.out} now holds ONLY those {len(issued)} token(s). If it "
+              f"previously\nheld the other {kept} and you had not distributed them yet, "
+              f"they are unrecoverable;\nreissue with --rotate.")
     if issued:
         print("\nThis file is the only copy of these secrets. Distribute it, then delete it.")
 

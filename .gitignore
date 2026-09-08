@@ -20,3 +20,6 @@ roster.csv
 
 # build/deploy artifacts
 *.tar.gz
+
+# who has already been mailed a token (student EIDs)
+tokens-sent.log
