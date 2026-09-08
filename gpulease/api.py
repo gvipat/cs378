@@ -20,11 +20,16 @@ from . import aws, config, db, keys, reaper
 
 log = logging.getLogger("gpulease.api")
 
-# Bumped to 2 for multi-node. A v1 CLI reads only `host` and would show a
-# student one of their two nodes with no hint that the other exists, on an
-# assignment whose whole point is the second one. That is the "genuinely
-# unavoidable" case the version gate is for.
-MIN_CLI_VERSION = 2
+# 2 was multi-node: a v1 CLI reads only `host` and would show a student one of
+# their two nodes with no hint that the other exists.
+#
+# 3 is ephemeral instances, and is the same kind of unavoidable. A v2 CLI tells
+# students "Files in /home/ubuntu survive a stop" and offers a confirmation
+# prompt only when starts are rationed. Both were true and neither is: a stop
+# now destroys the nodes and their disks. Leaving a v2 client working would
+# mean it actively reassures a group right up to the moment their work is
+# deleted, which is worse than making them download the new file.
+MIN_CLI_VERSION = 3
 
 
 @asynccontextmanager
@@ -63,7 +68,6 @@ def session_view(row, group_id):
             "starts_allowed": config.MAX_STARTS,
             "node_count": config.NODES_PER_GROUP,
             "deadline": config.DEADLINE or None,
-            "deadline_terminates": bool(config.TERMINATE_AT_DEADLINE and config.DEADLINE),
         }
     # Live usage, not the raw column: the column only moves when a session
     # closes, so a group six hours into a session would otherwise watch it sit
@@ -83,10 +87,6 @@ def session_view(row, group_id):
         # was actually given even if the setting changes under them.
         "node_count": db.node_count(row),
         "deadline": config.DEADLINE or None,
-        # Students have to be told their disks do not survive the deadline
-        # while they can still act on it -- afterwards the box is stopped and
-        # unreachable.
-        "deadline_terminates": bool(config.TERMINATE_AT_DEADLINE and config.DEADLINE),
     }
     if row["status"] in db.LIVE:
         view["expires_at"] = row["expires_at"]
@@ -231,20 +231,21 @@ def start(student=Depends(caller)):
     )
     if not ok:
         if reason == "spent":
+            # Only reachable when an instructor has set GPULEASE_MAX_STARTS;
+            # the default is unlimited and the budget below is the ration.
             used = existing["starts_used"]
             raise HTTPException(
                 429,
                 f"Group {gid} has already used "
                 f"{'its one session' if config.MAX_STARTS == 1 else f'all {used} of its sessions'}"
-                f" for {aid}. A session cannot be restarted once it ends, so this is "
-                f"the end of the line for this assignment. Email the instructor if "
-                f"something went wrong.",
+                f" for {aid}. Email the instructor if you need another.",
             )
         if reason == "quota":
             raise HTTPException(
                 429,
-                f"Group {gid} has used its {config.GPU_HOUR_QUOTA} GPU-hour budget for "
-                f"{aid}. Email the instructor if you need more.",
+                f"Group {gid} has used its whole {config.GPU_HOUR_QUOTA} GPU-hour budget "
+                f"for {aid}, so there are no more sessions. Email the instructor if you "
+                f"need more.",
             )
         if reason == "exhausted":
             # Enough budget left to be billed for, not enough to boot a cluster
@@ -277,11 +278,11 @@ def start(student=Depends(caller)):
     try:
         private_key, public_key = keys.new_keypair(f"gpulease-{gid}-{session_id[:8]}")
         db.set_key(gid, aid, private_key)
-        placed = aws.launch_or_resume(gid, aid, session_id, public_key, expires, nodes)
+        placed = aws.launch_cluster(gid, aid, session_id, public_key, expires, nodes)
         db.set_nodes(gid, aid, placed)
     # A launch that never produced a usable instance must not cost the group a
-    # start: FAILED is startable, and under MAX_STARTS=1 forgetting the refund
-    # would mean one capacity blip ends their assignment.
+    # start: FAILED is startable, and if an instructor has set MAX_STARTS,
+    # forgetting the refund would mean one capacity blip ends their assignment.
     except aws.RetryLater as e:
         db.set_failed(gid, aid, e)
         db.refund_start(gid, aid)
@@ -329,7 +330,10 @@ def stop(student=Depends(caller)):
 
     instance_ids = db.node_instance_ids(row)
     duration = db.accrue_and_close(gid, aid, f"stopped by {student['student_id']}")
-    aws.stop_instances(instance_ids, "student requested")
+    # Terminate, not stop: a stopped instance bills for its root volume around
+    # the clock, and the next `start` launches fresh nodes rather than resuming
+    # this one, so there would never be a reader for that disk again.
+    aws.terminate_instances(instance_ids, "student requested")
     db.mark_stopped(gid, aid)
 
     count = len(instance_ids)
@@ -337,8 +341,9 @@ def stop(student=Depends(caller)):
         "stopped": True,
         "session_duration_seconds": duration,
         "message": (
-            f"{count} instance{'s' if count != 1 else ''} stopping. "
-            f"Your files on the root volume{'s' if count != 1 else ''} are preserved."
+            f"{count} instance{'s' if count != 1 else ''} shutting down for good. "
+            f"The disk{'s' if count != 1 else ''} go{'' if count != 1 else 'es'} with "
+            f"{'them' if count != 1 else 'it'}; `start` gives you clean nodes."
             if count
             # A live session with nothing recorded against it: the reaper lost
             # the race, or the launch died between claiming and set_nodes.

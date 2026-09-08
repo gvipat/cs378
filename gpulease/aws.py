@@ -501,26 +501,15 @@ def ssh_ready(host: str, timeout: float = 2.5) -> bool:
 
 
 def _group_instances(group_id, states):
-    """Every instance belonging to one group, in rank order.
+    """Every instance tagged for one group, whatever state it is in.
 
-    Sorted by the NodeIndex tag so a resumed cluster keeps the ranks it had.
-    Instances from before multi-node carry no NodeIndex and sort to rank 0,
-    which is exactly where the group's single old box belongs.
+    Only used to find leftovers: a session records its own nodes in the
+    database at launch, so nothing has to ask EC2 what a group has.
     """
-    found = [i for i in course_instances(states=states) if instance_tag(i, "Group") == group_id]
-
-    def rank(inst):
-        try:
-            return int(instance_tag(inst, "NodeIndex", "0") or 0)
-        except ValueError:
-            return 0
-
-    # InstanceId breaks ties so the order is stable across calls even if two
-    # nodes somehow share a NodeIndex.
-    return sorted(found, key=lambda i: (rank(i), i["InstanceId"]))
+    return [i for i in course_instances(states=states) if instance_tag(i, "Group") == group_id]
 
 
-def _launch(group_id, session_id, user_data, sg_ids, tags, count, subnet=None, salt=""):
+def _launch(group_id, session_id, user_data, sg_ids, tags, count):
     """Launch `count` instances, all in one subnet. Returns [{instance_id, private_ip}].
 
     MinCount == MaxCount == count on purpose: for a distributed-training
@@ -533,7 +522,7 @@ def _launch(group_id, session_id, user_data, sg_ids, tags, count, subnet=None, s
     all-reduce moves a lot of gigabytes.
     """
     ami, root_device = image()
-    subnets = [subnet] if subnet else subnet_ids()
+    subnets = subnet_ids()
     last_error = None
     for attempt, sn in enumerate(subnets):
         try:
@@ -547,15 +536,18 @@ def _launch(group_id, session_id, user_data, sg_ids, tags, count, subnet=None, s
                 # our side and gets retried by botocore cannot leave us paying
                 # for two clusters. Per attempt, because a genuine retry in a
                 # different subnet is a different request and reusing the token
-                # would be an IdempotentParameterMismatch. `salt` separates a
-                # top-up launch from the session's first one.
-                ClientToken=f"{session_id}-{salt}{attempt}",
+                # would be an IdempotentParameterMismatch. The session id is
+                # new for every start, so tokens never collide across sessions.
+                ClientToken=f"{session_id}-{attempt}",
                 SecurityGroupIds=sg_ids,
                 UserData=user_data,
-                # An OS-level shutdown stops the instance instead of destroying
-                # it, so a student typing `sudo poweroff` loses their session
-                # but not their disk.
-                InstanceInitiatedShutdownBehavior="stop",
+                # Instances are ephemeral -- a session's nodes are destroyed
+                # when it ends and nothing on them outlives it -- so an
+                # OS-level shutdown terminates rather than stopping. A `stop`
+                # here would leave a root volume billing until the reaper's
+                # idle sweep noticed it, which is the cost this design exists
+                # to avoid.
+                InstanceInitiatedShutdownBehavior="terminate",
                 # InstanceMetadataTags is how a node with no AWS credentials
                 # learns its rank and its peers' addresses: the control plane
                 # writes them as tags, IMDS hands them back over link-local.
@@ -590,23 +582,20 @@ def _launch(group_id, session_id, user_data, sg_ids, tags, count, subnet=None, s
             last_error = e
             if "InsufficientInstanceCapacity" not in e.response["Error"]["Code"]:
                 raise
-    if subnet:
-        raise RetryLater(
-            "AWS has no capacity for the rest of your group's nodes in the subnet "
-            "your existing one is in, and they have to share a subnet. Try again "
-            "in a few minutes."
-        ) from last_error
     raise RetryLater(
         f"AWS has no capacity for {count} x {config.INSTANCE_TYPE} in one "
         f"availability zone right now."
     ) from last_error
 
 
-def launch_or_resume(group_id, assignment_id, session_id, public_key, expires, nodes=1) -> list:
-    """Bring up the group's whole cluster. Returns [{rank, instance_id, private_ip}].
+def launch_cluster(group_id, assignment_id, session_id, public_key, expires, nodes=1) -> list:
+    """Bring up a fresh cluster for the group. Returns [{rank, instance_id, private_ip}].
 
-    Prefers resuming the group's existing instances: the root volume is the
-    only persistence students get between sessions.
+    Every session gets new instances. Nothing is ever resumed, because nothing
+    survives to resume: `api.stop` and every reaper path terminate, so by the
+    time a group starts again there is nothing of theirs left -- and no root
+    volume of theirs still billing. A session is a clean box from the AMI,
+    every time.
 
     Every node gets the same user-data, and therefore the same session key --
     one key opens the whole cluster, which is also what lets `ssh -A` from one
@@ -627,68 +616,25 @@ def launch_or_resume(group_id, assignment_id, session_id, public_key, expires, n
     user_data = userdata.render(public_key)
     sg_ids = [security_group_id(), cluster_security_group_id(group_id)]
 
-    existing = _group_instances(group_id, states=STATES_ALL)
-
     # db.claim refuses to reach this point while the session is LIVE, so
-    # anything of this group's still running is a leftover from an attempt that
-    # died. Stop it rather than launching alongside it: ignored, it would not be
-    # reused (user-data is only rewritable on a stopped instance) and the
-    # shortfall below would launch a replacement next to it -- a third instance
-    # the session never records, that /session/stop can therefore never stop and
-    # that no reaper case catches while the session is live. The group loses
-    # nothing by the failure: api.start refunds the start on RetryLater.
-    strays = [i for i in existing if i["State"]["Name"] in ("pending", "running")]
+    # anything of this group's that still exists is a leftover from an attempt
+    # that died -- and it is garbage whatever state EC2 has it in: a running one
+    # is an instance no session will ever stop, a stopped one is a root volume
+    # nobody will ever read again. Destroy them rather than launching alongside
+    # and billing for both.
+    #
+    # No RetryLater and no waiting: terminating is asynchronous and nothing in
+    # the launch below depends on the old instances being gone. That is the one
+    # thing the resume path could not do -- user-data is only rewritable on a
+    # fully stopped instance, so it had to bounce the student and hope.
+    strays = _group_instances(group_id, states=STATES_ALL)
     if strays:
-        stop_instances([i["InstanceId"] for i in strays], "leftover from a previous run")
-        raise RetryLater(
-            "Cleaning up instances left over from an earlier attempt. "
-            "Try again in about a minute."
+        terminate_instances(
+            [i["InstanceId"] for i in strays],
+            f"leftovers from group {group_id}'s previous attempt",
         )
 
-    if any(i["State"]["Name"] == "stopping" for i in existing):
-        # User-data can only be rewritten on a fully stopped instance.
-        raise RetryLater(
-            "Your group's previous instance is still shutting down. "
-            "Try again in about a minute."
-        )
-
-    stopped = [i for i in existing if i["State"]["Name"] == "stopped"]
-    reuse = stopped[:nodes]
-    if len(stopped) > nodes:
-        log.warning(
-            "group %s has %d stopped instances but only %d nodes are configured; "
-            "leaving %s stopped",
-            group_id, len(stopped), nodes,
-            [i["InstanceId"] for i in stopped[nodes:]],
-        )
-
-    placed = [
-        {"instance_id": i["InstanceId"], "private_ip": private_ip(i), "subnet": i.get("SubnetId")}
-        for i in reuse
-    ]
-
-    shortfall = nodes - len(placed)
-    if shortfall > 0:
-        # Keep the whole cluster in one subnet, so top-up nodes follow the
-        # nodes the group already has rather than picking their own AZ.
-        subnet = placed[0]["subnet"] if placed else None
-        placed += _launch(
-            group_id, session_id, user_data, sg_ids, common, shortfall,
-            subnet=subnet, salt="topup-" if placed else "",
-        )
-
-    spread = {p["subnet"] for p in placed if p["subnet"]}
-    if len(spread) > 1:
-        # Not fatal -- the cluster works -- but every all-reduce now crosses an
-        # availability zone and is billed per gigabyte. Only reachable if
-        # someone placed instances for this group by hand, since every launch
-        # path here keeps them together.
-        log.error(
-            "group %s has nodes spread across subnets %s; cross-AZ traffic is "
-            "billed per GB. Terminate them at the end of the assignment so the "
-            "next launch places the group together.",
-            group_id, sorted(spread),
-        )
+    placed = _launch(group_id, session_id, user_data, sg_ids, common, nodes)
 
     missing_ip = [p["instance_id"] for p in placed if not p["private_ip"]]
     if missing_ip:
@@ -699,10 +645,11 @@ def launch_or_resume(group_id, assignment_id, session_id, public_key, expires, n
 
     peers = ",".join(p["private_ip"] for p in placed)
 
-    # Tag before starting anything: the peer list reaches the instance through
-    # IMDS, so it has to be on the instance before that instance boots. Freshly
-    # launched nodes are already booting by now, which is why the boot script
-    # retries the lookup for a while.
+    # Tag immediately: the peer list reaches the instance through IMDS, so it
+    # has to be on the instance before that instance looks for it. The nodes
+    # are already booting by now -- every node is freshly launched, there is no
+    # resume path where the tags are already in place -- which is why the boot
+    # script retries the lookup for a while and treats a miss as non-fatal.
     for rank, node in enumerate(placed):
         node["rank"] = rank
         ec2.create_tags(
@@ -715,28 +662,6 @@ def launch_or_resume(group_id, assignment_id, session_id, public_key, expires, n
             }),
         )
 
-    resumed = [p["instance_id"] for p in placed[:len(reuse)]]
-    for instance_id in resumed:
-        ec2.modify_instance_attribute(
-            InstanceId=instance_id, UserData={"Value": user_data.encode()}
-        )
-        ec2.modify_instance_attribute(
-            InstanceId=instance_id, InstanceInitiatedShutdownBehavior={"Value": "stop"}
-        )
-        # Both of these are no-ops for anything this version launched, and both
-        # matter for an instance from before multi-node existed: it has neither
-        # tags in IMDS nor the group's cluster security group.
-        ec2.modify_instance_metadata_options(
-            InstanceId=instance_id,
-            HttpTokens="required",
-            HttpPutResponseHopLimit=2,
-            InstanceMetadataTags="enabled",
-        )
-        ec2.modify_instance_attribute(InstanceId=instance_id, Groups=sg_ids)
-    if resumed:
-        ec2.start_instances(InstanceIds=resumed)
-        log.info("resumed %s for group %s", resumed, group_id)
-
     return [
         {"rank": n["rank"], "instance_id": n["instance_id"], "private_ip": n["private_ip"],
          "host": None}
@@ -744,32 +669,22 @@ def launch_or_resume(group_id, assignment_id, session_id, public_key, expires, n
     ]
 
 
-def stop_instances(instance_ids, reason=""):
-    if not instance_ids:
-        return
-    log.info("stopping %s (%s)", instance_ids, reason)
-    try:
-        ec2.stop_instances(InstanceIds=list(instance_ids))
-    except ClientError as e:
-        if "NotFound" not in e.response["Error"]["Code"]:
-            log.error("stop failed for %s: %s", instance_ids, e)
-
-
 def terminate_instances(instance_ids, reason=""):
-    """Destroy instances and their root volumes. Not reachable from a request.
+    """Destroy instances and their root volumes. This is how every session ends.
 
-    The only caller is the reaper's deadline sweep, and only once the deadline
-    plus GPULEASE_TERMINATE_GRACE_HOURS has passed with
-    GPULEASE_TERMINATE_AT_DEADLINE on. Everything before that point stops
-    instances, because the root volume is the only persistence students get.
+    `api.stop`, every reaper case, the deadline sweep, `admin.py kill` and
+    `admin.py terminate` all land here. There is deliberately no stop path: a
+    stopped instance is a root volume billing around the clock for a session
+    nobody can ever return to, since the next start launches fresh nodes.
 
-    Logged at error level on purpose: this is the one operation in the system
-    that destroys student work, and it should be impossible to find a bill for
-    a term's deleted volumes without also finding the line that deleted them.
+    Logged loudly on purpose. It destroys whatever is on the box, and while
+    students are told that by the CLI, the motd and the README, it should still
+    be impossible to find a deleted volume without finding the line that
+    deleted it.
     """
     if not instance_ids:
         return
-    log.error("TERMINATING %s (%s) - root volumes go with them", instance_ids, reason)
+    log.warning("terminating %s (%s) - root volumes go with them", instance_ids, reason)
     try:
         ec2.terminate_instances(InstanceIds=list(instance_ids))
     except ClientError as e:

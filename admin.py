@@ -5,11 +5,11 @@
     ./admin.py roster roster.csv --rotate
     ./admin.py sessions                 # who has what, and what it has cost
     ./admin.py instances                # ground truth from EC2
-    ./admin.py kill --group 7           # stop instances now
+    ./admin.py kill --group 7           # destroy group 7's instances now
     ./admin.py reap                     # run one reconciliation pass
     ./admin.py budget 7 --hours 0       # give group 7 their hours back
-    ./admin.py grant 7                  # give group 7 another start
-    ./admin.py terminate                # destroy instances AND disks - no undo
+    ./admin.py grant 7                  # only when GPULEASE_MAX_STARTS is set
+    ./admin.py terminate                # destroy every instance for an assignment
     ./admin.py disable abc123           # revoke a token (enable puts it back)
 
 Run it on the control-plane box; it reads the same gpulease.env the service does.
@@ -111,11 +111,12 @@ def cmd_access(args):
 
 
 def cmd_grant(args):
-    """Give a group another start after their one session ended badly.
+    """Give a group another start, when starts are rationed at all.
 
-    With GPULEASE_MAX_STARTS=1 this is the only way back in, so expect to use
-    it: an instance that came up broken, a student who stopped the session by
-    mistake, a lease that expired mid-experiment.
+    Only means anything with GPULEASE_MAX_STARTS set to a positive number. The
+    default is unlimited starts, where a group that needs another session just
+    runs `start` again and the thing that eventually stops them is the hour
+    budget -- which is `budget`, not this.
     """
     aid = args.assignment or config.ACTIVE_ASSIGNMENT
     left = db.grant_starts(args.group_id, aid, args.starts)
@@ -150,11 +151,14 @@ def cmd_budget(args):
 def cmd_terminate(args):
     """Destroy this course's instances and their root volumes. Irreversible.
 
-    The reaper does this on its own once the deadline plus the grace period has
-    passed and GPULEASE_TERMINATE_AT_DEADLINE is on. This is the same thing on
-    demand, for when you are done with an assignment early or never turned that
-    on -- reclaiming the volumes is worth a few hundred dollars a month at 30
-    groups, and nothing else in the system frees them.
+    Rarely needed now: every session ends by terminating, the reaper reclaims
+    anything it finds stopped, and the deadline sweep clears the rest, so under
+    normal operation there is nothing left over to clean up. This is the
+    sledgehammer for when there is -- instances from an assignment whose
+    deadline was never set, or anything placed by hand.
+
+    `kill` is the one you want for ending a live session: same effect, scoped
+    to what is actually running.
     """
     aid = args.assignment or config.ACTIVE_ASSIGNMENT
     insts = [
@@ -245,6 +249,12 @@ def cmd_instances(args):
 
 
 def cmd_kill(args):
+    """End a running session now.
+
+    Terminates, because that is the only way sessions end here: a stopped
+    instance would keep billing for a root volume that the next `start` will
+    never look at. The group can start again if they have budget left.
+    """
     ids = [
         i["InstanceId"]
         for i in aws.course_instances(states=("pending", "running"))
@@ -253,10 +263,10 @@ def cmd_kill(args):
     if not ids:
         print("nothing running")
         return
-    print("stopping:", ids)
+    print("destroying (instances and their disks):", ids)
     if input("confirm (yes): ").strip() != "yes":
         return
-    aws.stop_instances(ids, "instructor kill")
+    aws.terminate_instances(ids, "instructor kill")
     print("done. The reaper will reconcile the database within a couple of minutes.")
 
 
@@ -287,7 +297,7 @@ if __name__ == "__main__":
     sub.add_parser("reap", help="run one reconciliation pass").set_defaults(func=cmd_reap)
     sub.add_parser("preflight", help="check AWS permissions").set_defaults(func=cmd_preflight)
 
-    p = sub.add_parser("kill", help="stop instances now")
+    p = sub.add_parser("kill", help="destroy running instances now")
     p.add_argument("--group", help="limit to one group")
     p.set_defaults(func=cmd_kill)
 
@@ -305,7 +315,7 @@ if __name__ == "__main__":
                    help="every assignment, not just one")
     p.set_defaults(func=cmd_terminate)
 
-    p = sub.add_parser("grant", help="give a group another start")
+    p = sub.add_parser("grant", help="another start (only if MAX_STARTS is set)")
     p.add_argument("group_id")
     p.add_argument("--starts", type=int, default=1, help="how many (default 1)")
     p.add_argument("--assignment", help="default: the active one")

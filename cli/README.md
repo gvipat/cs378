@@ -8,12 +8,17 @@ packages. One file, one token, four commands.
 gpulease login <token>    save the token your instructor gave you
 gpulease start            bring up your group's nodes, print an ssh line for each
 gpulease status           what you have, how long it lasts, what it has cost
-gpulease stop             shut the nodes down and stop the meter
+gpulease stop             destroy the nodes and stop the meter
 ```
 
 Your whole **group shares one lease**. If a groupmate has already run `start`,
 your `start` just hands you the same nodes and the same key — it does not launch
 a second set. `stop` ends it for everybody.
+
+> **Your nodes are temporary.** `stop`, and the end of your lease, **destroy**
+> them and everything on their disks. `start` then gives you brand new, empty
+> nodes. Work in a git repo and push before you stop — nothing else is kept.
+> You can start as many times as your gpu-hour budget allows.
 
 ---
 
@@ -100,7 +105,8 @@ private key is deliberately never copied onto the instances, so without `-A`,
 You are `ubuntu`, and you have `sudo`. It is an Ubuntu box; what is installed on
 it is whatever image the course uses — `nvidia-smi` tells you what GPUs you have,
 and your assignment handout tells you what else to expect. Anything you install
-yourself survives a stop, along with the rest of the disk.
+yourself is gone when the session ends, so if you find yourself installing the
+same things every time, put them in a setup script you keep in your repo.
 
 ### The multi-node bits
 
@@ -132,14 +138,22 @@ them.
 
 ### What survives, and what does not
 
-- **A stop keeps your disk.** Files under `/home/ubuntu` are still there when
-  your group starts again (if your group has starts left — see below).
-- **The end of the assignment does not.** After the deadline the nodes are shut
-  down, and some time after that the disks are **deleted**. `gpulease status`
-  warns you when this applies. There is no recovering anything afterwards — you
-  cannot reach a stopped machine.
-- **So push your work to git.** Every time. The disk is the only copy otherwise,
-  and it is on a machine you do not own.
+**Nothing on the nodes survives.** Not your code, not your data, not the package
+you spent twenty minutes installing. The moment a session ends, the machines and
+their disks are destroyed:
+
+- when anyone in your group runs `gpulease stop`,
+- when your lease runs out (`gpulease status` tells you when that is),
+- if one of your nodes fails and the service cleans up the rest,
+- at the assignment deadline.
+
+There is no recovery and no backup. **Push to git before you stop** — every
+time, not just at the end of the day. Treat the nodes as somewhere you *run*
+your work, never somewhere you *keep* it.
+
+The upside of the same rule: a stop is cheap. You are not spending a scarce
+session, you are just handing back machines you can ask for again, and every
+`start` gives you a clean box instead of last week's mess.
 
 ---
 
@@ -151,17 +165,20 @@ gpulease status
 
 Reading the output:
 
-- **`lease ends in ...`** — your nodes are shut down automatically at this time,
+- **`lease ends in ...`** — your nodes are destroyed automatically at this time,
   whether or not you are using them. If it says `(the assignment deadline)` or
   `(all the gpu-hours you have left)`, that is why the lease is shorter than you
   expected.
-- **`gpu-hours`** — what your group has spent and what it has left. It is
-  counted **per node**: a 2-node cluster spends 2 GPU-hours for every hour it is
-  up, so a 60-hour budget is 30 hours of a 2-node cluster. The number moves while
-  you are running; you are billed when the session stops.
-- **`sessions n used / m allowed`** — only appears if your instructor rations
-  starts. If it says you have one session, read section 5 before you type `stop`.
-- **`deadline`** — when the assignment's machines go away for good.
+- **`gpu-hours`** — what your group has spent and what it has left. **This is
+  the thing that runs out.** It is counted **per node**: a 2-node cluster spends
+  2 GPU-hours for every hour it is up, so a 60-hour budget is 30 hours of a
+  2-node cluster. The number moves while you are running; you are billed when
+  the session stops. When it reaches your quota, `start` stops working for the
+  rest of the assignment.
+- **`sessions n used / m allowed`** — only appears if your instructor also caps
+  the number of sessions. Usually they do not, and the gpu-hours line above is
+  the whole story.
+- **`deadline`** — after this, no more sessions at all.
 
 `status` works from anywhere; you do not have to be logged into a node.
 
@@ -173,27 +190,27 @@ Reading the output:
 gpulease stop
 ```
 
-This shuts down every node in your group's lease and stops the charges. It waits
-until the shutdown is actually confirmed before it exits — if it warns that it
-could not confirm, run `gpulease status` a minute later and check.
+This **destroys** every node in your group's lease and stops the charges. It
+waits until the shutdown is actually confirmed before it exits — if it warns
+that it could not confirm, run `gpulease status` a minute later and check.
 
-**Stopping is how you save budget.** Nothing on the machine notices that you have
-walked away; an idle cluster costs exactly as much as a busy one, right up until
-the lease expires. Stop it when you go to dinner.
-
-**If your group gets one session,** `stop` is the end, not a pause. The CLI will
-tell you so and make you type `stop` to confirm:
+**Push first.** Everything on those disks goes with them. The CLI makes you type
+`stop` to confirm, precisely so you have a moment to remember:
 
 ```
-This is your group's last session for hw4.
-It stops all 2 of your nodes.
-Stopping it is permanent - 'gpulease start' will not work again.
-Your files stay on the disk, but you will not be able to reach them.
+This DESTROYS your group's all 2 nodes and everything on their disks.
+Anything you have not pushed to git is gone for good.
+'gpulease start' will give you new, empty nodes (18.5 gpu-hours left).
 Type 'stop' to confirm:
 ```
 
 Anything other than `stop` leaves it running. Do not use `-y` to skip this
 prompt unless you are certain.
+
+**Stopping is how you save budget.** Nothing on the machine notices that you have
+walked away; an idle cluster costs exactly as much as a busy one, right up until
+the lease expires. Stop it when you go to dinner — and start a new one when you
+come back. That is the intended rhythm, not a last resort.
 
 **Tell your group before you stop.** One lease, shared — your `stop` ends their
 run too.
@@ -221,12 +238,14 @@ left in your shell (`unset GPULEASE_API` clears it).
 Download the current `gpulease.py` from the course page, replacing your copy.
 Your token and your session are unaffected.
 
-**`Group 7 has already used its one session for hw4.`**
-Your group's lease for this assignment is over and cannot be restarted. Email
-your instructor — restarts can be granted, but that is their call.
+**`Group 7 has used its whole 60 GPU-hour budget for hw4.`**
+You have spent the group's hours for this assignment, so there are no more
+sessions. This is the limit that actually bites — watch the `gpu-hours` line in
+`status` well before you reach it. Email your instructor if you need more.
 
-**`Group 7 has used its 60 GPU-hour budget for hw4.`**
-You have spent the group's hours. Same answer: email your instructor.
+**`Group 7 has already used its one session for hw4.`**
+Only if your instructor capped the number of sessions as well. Email them;
+another start can be granted, but that is their call.
 
 **`Group 7 has 0.12 of its 60 GPU-hours left ... a session needs at least 15 minutes' worth`**
 There is budget left, but not enough to boot a cluster and do anything with it,
@@ -255,10 +274,11 @@ You connected without `-A`. Log out and reconnect with the `ssh -A ...` line.
 Something loosened the permissions on the key. `chmod 600 ~/.ssh/gpulease_<group>`.
 
 **My node disappeared mid-session.**
-If one node of a multi-node lease dies, the service stops the rest and closes
+If one node of a multi-node lease dies, the service destroys the rest and closes
 the session — a half cluster cannot finish the job and would bill in full while
-failing to. Run `gpulease status` to confirm, then talk to your instructor about
-a restart.
+failing to. Run `gpulease status` to confirm, then `gpulease start` for a fresh
+pair. If it cost you a meaningful chunk of budget through no fault of yours,
+say so to your instructor; they can refund the hours.
 
 ---
 
@@ -268,7 +288,7 @@ a restart.
 gpulease login <token>                        # once per machine
 gpulease start                                # bring up the group's nodes
 gpulease status                               # lease, budget, ssh lines
-gpulease stop                                 # shut down, stop the meter
+gpulease stop                                 # destroy the nodes, stop the meter
 
 ssh -A -i ~/.ssh/gpulease_<group> ubuntu@<node0>   # -A is not optional
 ```
@@ -278,5 +298,5 @@ ssh -A -i ~/.ssh/gpulease_<group> ubuntu@<node0>   # -A is not optional
 | `~/.config/gpulease/credentials` | your saved token |
 | `~/.ssh/gpulease_<group>` | this session's private key |
 
-Anything not covered here: ask on the course forum. If it involves money, a lost
-disk, or a session you cannot restart, email your instructor directly.
+Anything not covered here: ask on the course forum. If it involves money, or
+budget you lost through no fault of your own, email your instructor directly.

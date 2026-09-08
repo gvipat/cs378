@@ -1,10 +1,15 @@
 """The cloud-init user-data handed to a student instance.
 
-Its one real job is installing this session's SSH key, and the interesting part
-is that it happens on EVERY boot. `bootcmd` is the one cloud-init module with
-ALWAYS frequency, so putting the payload there means the control plane can hand
-a *resumed* instance a fresh key: it rewrites the user-data while the instance
-is stopped, and the next boot picks it up.
+Its one real job is installing this session's SSH key. That happens in
+`bootcmd`, the one cloud-init module with ALWAYS frequency, so it re-runs on
+every boot rather than only the first.
+
+That used to be load-bearing: the control plane rewrote a *stopped* instance's
+user-data and the next boot picked up a fresh key, which is how a resumed
+instance got a new key. There are no resumes any more -- every session is a new
+instance from the AMI -- so a per-instance module would now be enough. It stays
+in bootcmd anyway: it is idempotent, it costs nothing, and it puts the key and
+the peer files back after a reboot, which a student may well do mid-session.
 
 Its other job is telling the node who its peers are. The control plane tags
 each instance with its rank and the private addresses of the whole group, and
@@ -13,9 +18,11 @@ the control plane. That is what makes a distributed-training cluster possible
 on boxes that hold no AWS keys.
 
 Student instances hold no AWS credentials and run no gpulease agent. Nothing
-here phones home, and nothing here can stop the instance. Ending a session is
-entirely the control plane's job (`api.stop`, or the reaper at lease expiry),
-which is the only place it can be enforced against a student who has root.
+here phones home, and nothing here ends a session on a schedule. Enforcing the
+end of one is entirely the control plane's job (`api.stop`, or the reaper at
+lease expiry), which is the only place it can be enforced against a student who
+has root. A student can of course destroy their own node from inside it -- an
+OS-level shutdown terminates -- but that only ever spends less money.
 
 Templating is by @@SENTINEL@@ replacement rather than str.format, because the
 payload is full of shell ${braces}.
@@ -29,8 +36,13 @@ from . import config
 MOTD = """
   @@COURSE@@ GPU instance - group lease, node %RANK% of %NODES%
   ------------------------------------------------------------
-  This machine stops at the end of your lease window. Run
-  'gpulease status' on your own machine to see how long is left.
+  THIS MACHINE IS TEMPORARY. It is destroyed - disk and all -
+  when your lease ends or anyone in your group runs
+  'gpulease stop'. Nothing here is backed up or kept.
+  Push your work to git before you stop.
+
+  Run 'gpulease status' on your own machine to see how long is
+  left. 'gpulease start' after that gives you a NEW, empty node.
 
   Your group's nodes:   cat /etc/gpulease/peers
   They are also in /etc/hosts as node0, node1, ...
@@ -40,9 +52,6 @@ MOTD = """
 
   ssh between nodes uses the same key you used to get here, so
   connect with `ssh -A` and it will be forwarded for you.
-
-  Files under /home/ubuntu survive a stop. They do NOT survive the
-  end of the assignment. Push your work to git.
   ------------------------------------------------------------
 """
 
@@ -60,8 +69,7 @@ set -u
 # module - so on a first boot the default user does not exist yet and there is
 # nothing to install a key for. That case is covered by ssh_authorized_keys in
 # the cloud-config above, which the ssh module applies a few moments later.
-# On every later boot the user exists and this is what rewrites the key, which
-# is how a resumed instance comes up accepting a *new* session key.
+# On a reboot the user exists and this is what puts the key back.
 #
 # Every node in the group gets this same payload, so one key opens all of them.
 if id -u ubuntu >/dev/null 2>&1; then
@@ -91,10 +99,11 @@ fi
 # link-local and needs no credentials - which is the whole point on a box that
 # deliberately holds no AWS keys, and why this is not an agent phoning home.
 #
-# The tags are written moments after RunInstances returns, so a *first* boot
-# can genuinely lose the race; on a resume they are already there. Hence the
-# retry, and hence nothing below being fatal when they never turn up: a student
-# with no peers file still has a working machine.
+# The tags are written moments after RunInstances returns, so this boot can
+# genuinely lose the race -- and every boot is now a first boot, since each
+# session launches new instances. Hence the retry, and hence nothing below
+# being fatal when the tags never turn up: a student with no peers file still
+# has a working machine.
 IMDS=http://169.254.169.254/latest
 TOKEN=$(curl -sf -X PUT --max-time 2 "$IMDS/api/token" \\
   -H 'X-aws-ec2-metadata-token-ttl-seconds: 300' || echo "")
@@ -115,11 +124,10 @@ RANK=$(meta tags/instance/NodeIndex)
 if [ -z "$RANK" ]; then RANK=0; fi
 
 # Clear the previous boot's cluster state BEFORE deciding whether we have a new
-# one. Private addresses survive a stop, so a resumed cluster usually rewrites
-# the same values -- but if the lookup above came up empty, or the group was
-# rebuilt with new instances, the old files would otherwise sit there pointing
-# at addresses that now belong to somebody else. Stale peers are worse than no
-# peers: no peers fails immediately, stale peers hang.
+# one. A fresh instance has none, so this is about reboots: if the IMDS lookup
+# above came up empty this time, the old files would otherwise sit there
+# pointing at addresses that now belong to somebody else's cluster. Stale peers
+# are worse than no peers -- no peers fails immediately, stale peers hang.
 rm -f /etc/gpulease/peers /etc/gpulease/hostfile /etc/profile.d/gpulease-cluster.sh
 sed -i '/ # gpulease$/d' /etc/hosts
 
