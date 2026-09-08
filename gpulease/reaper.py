@@ -173,12 +173,34 @@ def _sweep_terminate():
     and they are exactly the volumes being reclaimed. STATES_ALL excludes
     `terminated`, so repeated passes converge on an empty list and this is
     idempotent like everything else here.
+
+    Scoped to ACTIVE_ASSIGNMENT, which is what GPULEASE_DEADLINE is a cutoff
+    for. Without that filter this destroys every volume carrying the course
+    tag, so bumping the assignment to hw2 while leaving hw1's deadline in place
+    would reclaim hw2's disks out from under a class that is still working --
+    and nothing ties those two settings together to stop you. An instance with
+    no Assignment tag is left alone for the same reason: unrecognised is not a
+    good enough reason to destroy someone's work. Old assignments' leftovers
+    are `admin.py terminate --all-assignments`, where a human types the course
+    tag first.
     """
     if not (config.TERMINATE_AT_DEADLINE and config.TERMINATE_AT):
         return []
     if db.now() < config.TERMINATE_AT:
         return []
-    ids = [i["InstanceId"] for i in aws.course_instances(states=aws.STATES_ALL)]
+
+    ids, skipped = [], []
+    for inst in aws.course_instances(states=aws.STATES_ALL):
+        if aws.instance_tag(inst, "Assignment") == config.ACTIVE_ASSIGNMENT:
+            ids.append(inst["InstanceId"])
+        else:
+            skipped.append(inst["InstanceId"])
+    if skipped:
+        log.warning(
+            "leaving %d instance(s) not tagged Assignment=%s: %s. Their volumes "
+            "still bill; reclaim them with `admin.py terminate --all-assignments`.",
+            len(skipped), config.ACTIVE_ASSIGNMENT, skipped,
+        )
     if not ids:
         return []
     aws.terminate_instances(ids, "assignment over, reclaiming volumes")

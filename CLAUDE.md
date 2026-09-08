@@ -281,10 +281,14 @@ nothing this service creates can escape the scope of what it may destroy.
 **`GPULEASE_DEADLINE` is parsed at import, not on use.** A malformed value is
 a `SystemExit` at boot rather than a cost control that silently never fires,
 and a value with no UTC offset is read as UTC — which a syllabus date almost
-never is. Consequences: it is a restart to change, and `gpulease.env.example`
-ships with a date already filled in, so a fresh install that takes the example
-verbatim inherits a real deadline — and, since the example also ships
-`GPULEASE_TERMINATE_AT_DEADLINE=1`, a date on which volumes get destroyed.
+never is. Consequences: it is a restart to change, and
+`gpulease.env.example` ships it **blank** on purpose. `setup.sh` copies that
+file to `gpulease.env` when there is none and then starts the service on it, so
+a date filled in there is live on first boot — and since the example also ships
+`GPULEASE_TERMINATE_AT_DEADLINE=1`, it would be a date on which every root
+volume tagged for the course is destroyed. The blank is what breaks that chain
+(`TERMINATE_AT` is 0 without a deadline, and `_sweep_terminate` returns
+immediately). Do not "helpfully" fill it in; stamp it at deploy time.
 
 **`GPULEASE_DEADLINE` is enforced in three places, and needs all three.**
 `api.start` refuses new sessions past it *and* caps `expires_at` so no lease
@@ -371,9 +375,17 @@ show a group one of their two nodes with no hint the other exists.
 
 Every setting is tabulated in README → "Configuration reference"; keep that
 table and `gpulease.env.example` in step with `config.py` when you add one.
-Two deliberate mismatches live there and are not bugs to tidy: the code
+Three deliberate mismatches live there and are not bugs to tidy. The code
 defaults to `t3.micro` and a 30 GB root while the example ships `g4dn.xlarge`
-and 100 GB, because a missing config file should not launch a GPU fleet.
+and 100 GB, because a missing config file should not launch a GPU fleet. For
+the same reason `COURSE` defaults to something that is *not* this deployment's
+tag (`utcs378`, which is what the example and the README walkthrough ship): an
+unconfigured install must not inherit the live course's blast radius, and since
+the host's IAM policy is scoped to the real tag it is denied at
+`CreateSecurityGroup` instead of quietly stopping real students' instances.
+That denial reads "no identity-based policy allows the
+ec2:CreateSecurityGroup action" and is almost always a tag mismatch rather than
+a missing permission.
 `NODES_PER_GROUP` is validated at import against `MAX_NODES_PER_GROUP` (8) and
 refuses to start outside it — a typo there is a bill, not a warning.
 

@@ -85,6 +85,14 @@ def deadline_str():
 # --- identity -------------------------------------------------------------
 # COURSE is the tag every instance carries. It is also the blast radius: the
 # service only ever describes, starts or stops instances carrying this tag.
+#
+# The default is deliberately NOT the production tag (`utcs378`, which is what
+# gpulease.env.example and the README walkthrough ship). Same reasoning as
+# t3.micro vs g4dn.xlarge below: a missing or unreadable config file must not
+# silently inherit the live course's blast radius and start stopping real
+# students' instances. It fails loudly instead -- the lease host's IAM policy
+# is scoped to the real tag, so an unconfigured install is denied at
+# CreateSecurityGroup rather than doing something quiet and wrong.
 COURSE = _str("GPULEASE_COURSE", "cs378")
 REGION = _str("GPULEASE_REGION", "us-west-2")
 

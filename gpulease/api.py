@@ -291,15 +291,22 @@ def start(student=Depends(caller)):
         db.refund_start(gid, aid)
         err = e.response.get("Error", {})
         code, message = err.get("Code", "Unknown"), err.get("Message", "")
-        # The Code alone is close to useless for the generic ones -- an
-        # InvalidParameterValue that does not say WHICH parameter costs a round
-        # trip through journalctl to diagnose. The Message names it, so log it
-        # on its own line and hand it back: this is an instructor-operated
-        # service, and the person reading the error is the person who can fix
-        # the config.
-        log.error("launch failed for group %s: %s: %s", gid, code, message)
-        log.exception("launch failed for group %s", gid)
-        raise HTTPException(500, f"Launch failed: {code}: {message}"[:400])
+        # The Message goes to the log, never to the response. AWS puts
+        # identifiers in it -- an UnauthorizedOperation names the account, the
+        # role and this host's instance id -- and the caller here is a student.
+        # It is still logged on its own line, because an InvalidParameterValue
+        # that does not say WHICH parameter costs a round trip through
+        # journalctl and the instructor is the one who can fix the config.
+        #
+        # The Code carries no identifiers and is the half that tells a student
+        # whether to retry, so that is what goes back, with a reference tying
+        # it to the log line.
+        ref = session_id[:8]
+        log.error("launch failed for group %s [ref %s]: %s: %s", gid, ref, code, message)
+        log.exception("launch failed for group %s [ref %s]", gid, ref)
+        raise HTTPException(
+            500, f"Launch failed ({code}). Tell the instructor and quote ref {ref}."
+        )
     except Exception as e:  # noqa: BLE001 - never strand the row in PROVISIONING
         db.set_failed(gid, aid, e)
         db.refund_start(gid, aid)
