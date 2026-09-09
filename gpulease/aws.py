@@ -509,6 +509,16 @@ def _group_instances(group_id, states):
     return [i for i in course_instances(states=states) if instance_tag(i, "Group") == group_id]
 
 
+# Launch errors that mean "not in this subnet, try the next one" rather than
+# "give up". InsufficientInstanceCapacity is a transient shortage in one AZ.
+# Unsupported is permanent and structural -- the instance type is not offered in
+# that AZ at all, which EC2 only ever tells you per request, never through
+# describe_subnets. Both mean the same thing to the loop below, and treating
+# Unsupported as fatal is how a working three-AZ deployment turns into an outage
+# the day describe_subnets happens to return the fourth subnet first.
+_TRY_NEXT_SUBNET = ("InsufficientInstanceCapacity", "Unsupported")
+
+
 def _launch(group_id, session_id, user_data, sg_ids, tags, count):
     """Launch `count` instances, all in one subnet. Returns [{instance_id, private_ip}].
 
@@ -524,6 +534,7 @@ def _launch(group_id, session_id, user_data, sg_ids, tags, count):
     ami, root_device = image()
     subnets = subnet_ids()
     last_error = None
+    unsupported = 0
     for attempt, sn in enumerate(subnets):
         try:
             resp = ec2.run_instances(
@@ -580,8 +591,27 @@ def _launch(group_id, session_id, user_data, sg_ids, tags, count):
             return placed
         except ClientError as e:
             last_error = e
-            if "InsufficientInstanceCapacity" not in e.response["Error"]["Code"]:
+            code = e.response["Error"]["Code"]
+            if code not in _TRY_NEXT_SUBNET:
                 raise
+            if code == "Unsupported":
+                unsupported += 1
+            log.warning("%s in %s for group %s; trying the next subnet", code, sn, group_id)
+    if unsupported == len(subnets):
+        # Not a shortage: not one configured subnet is in an AZ that offers this
+        # instance type, so every retry from here to the deadline fails the same
+        # way. RetryLater would tell a student to wait it out, which is advice
+        # that can never come good -- only GPULEASE_INSTANCE_TYPE or
+        # GPULEASE_SUBNET_IDS can fix it, and only the instructor can set those.
+        # A plain exception routes it to api.start's 500 and the journal, which
+        # is where the person who can act on it is looking.
+        raise RuntimeError(
+            f"{config.INSTANCE_TYPE} is not offered in any availability zone "
+            f"covered by these subnets ({', '.join(subnets)}). Check "
+            f"`aws ec2 describe-instance-type-offerings --location-type "
+            f"availability-zone --filters Name=instance-type,"
+            f"Values={config.INSTANCE_TYPE}` and fix GPULEASE_SUBNET_IDS."
+        ) from last_error
     raise RetryLater(
         f"AWS has no capacity for {count} x {config.INSTANCE_TYPE} in one "
         f"availability zone right now."
