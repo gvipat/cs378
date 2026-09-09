@@ -21,5 +21,10 @@ roster.csv
 # build/deploy artifacts
 *.tar.gz
 
+# Claude Code scratch worktrees: full copies of the tree at some earlier
+# point, including one that still calls aws.stop_instances. Committing them
+# would put code this design forbids back in the repo under a second name.
+.claude/worktrees/
+
 # who has already been mailed a token (student EIDs)
 tokens-sent.log

@@ -52,9 +52,16 @@ def _prog():
     `gpulease`, and someone who dropped it on their PATH should not be told to
     type `python3`. argparse's default is the bare basename, which gets the
     first case wrong in a way that reads as a broken instruction.
+
+    `py` on Windows for the same reason: the python.org installer ships
+    python.exe and the py launcher and no python3.exe at all, so `python3` there
+    hits the Microsoft Store's "Python was not found" redirect -- an error about
+    installing Python, printed to someone who has just run Python.
     """
     name = os.path.basename(sys.argv[0]) or "gpulease"
-    return f"python3 {name}" if name.endswith(".py") else name
+    if not name.endswith(".py"):
+        return name
+    return f"{'py' if os.name == 'nt' else 'python3'} {name}"
 
 
 PROG = _prog()
@@ -139,9 +146,20 @@ def write_private(path, text):
 
     Opening then chmod'ing leaves a window at the umask's mercy, which on a
     shared lab machine is enough to leak a key or a token.
+
+    `newline=""` is load-bearing on Windows. Text mode there rewrites every "\\n"
+    as "\\r\\n", and an OpenSSH private key with CRLF line endings does not parse
+    -- ssh fails with `Load key: error in libcrypto`, which says nothing about
+    line endings and sends the student to the course forum. The bytes we write
+    have to be the bytes the server sent.
+
+    On Windows the mode and the chmod below only toggle the read-only flag; the
+    ACL restriction is POSIX-only. Files land under the user's profile, which
+    Windows OpenSSH accepts, but they are not locked down the way they are on
+    macOS and Linux.
     """
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
+    with os.fdopen(fd, "w", newline="") as f:
         f.write(text)
     os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)  # in case the file pre-existed
 

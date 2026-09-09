@@ -54,6 +54,11 @@ def _list(name, default=""):
     return [x.strip() for x in (_str(name) or default).split(",") if x.strip()]
 
 
+# The offset GPULEASE_DEADLINE was written in, kept so deadline_str() can show
+# students the wall clock they actually live in. None until _deadline() runs.
+DEADLINE_TZ = None
+
+
 def _deadline(name):
     """An absolute cutoff, as a unix timestamp. 0 when unset.
 
@@ -61,6 +66,7 @@ def _deadline(name):
     not a cost control that silently never fires. A bare timestamp is read as
     UTC, which is rarely what a syllabus means - write the offset.
     """
+    global DEADLINE_TZ
     raw = _str(name)
     if not raw:
         return 0
@@ -73,13 +79,27 @@ def _deadline(name):
         ) from e
     if stamp.tzinfo is None:
         stamp = stamp.replace(tzinfo=timezone.utc)
+    DEADLINE_TZ = stamp.tzinfo
     return int(stamp.timestamp())
 
 
 def deadline_str():
+    """The cutoff in the offset it was configured in, with UTC alongside.
+
+    Both halves, because this string is quoted at students -- /healthz,
+    api.start's refusal, the token mail -- and the two forms can name different
+    DAYS. A cutoff at 23:59 on the 22nd US Central is 04:59 on the 23rd in UTC,
+    and a mail that shows only the second tells a class the assignment runs a
+    day longer than it does. UTC-only when that is what was configured, since
+    printing it twice helps nobody.
+    """
     if not DEADLINE:
         return "none"
-    return datetime.fromtimestamp(DEADLINE, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    utc = datetime.fromtimestamp(DEADLINE, timezone.utc)
+    if DEADLINE_TZ is None or DEADLINE_TZ.utcoffset(utc) == timezone.utc.utcoffset(utc):
+        return utc.strftime("%Y-%m-%d %H:%M UTC")
+    local = datetime.fromtimestamp(DEADLINE, DEADLINE_TZ)
+    return f"{local:%Y-%m-%d %H:%M} {local:%Z} ({utc:%Y-%m-%d %H:%M} UTC)"
 
 
 # --- identity -------------------------------------------------------------

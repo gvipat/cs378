@@ -55,7 +55,7 @@ start and stop your group's nodes and destroy what is on them.
   token    {token}
   group    {group}
 
-Getting started - you need Python 3.9+ and nothing else. No AWS account:
+Getting started - you need Python 3.9+.
 
   1. Get gpulease.py: {cli_url}
   2. python3 gpulease.py login {token}
@@ -63,17 +63,20 @@ Getting started - you need Python 3.9+ and nothing else. No AWS account:
      python3 gpulease.py status    # check on it any time
      python3 gpulease.py stop      # when you are done - idle nodes still bill
 
-Three things that will save you a bad afternoon:
+  On Windows, type `py` everywhere this says `python3` - the python.org
+  installer does not give you a `python3` command.
+
+{count} Warnings:
 
   * YOUR NODES ARE TEMPORARY. `stop`, the end of your lease and the
     assignment deadline all destroy them AND their disks. Nothing is backed
     up and nothing carries over. Work in git and push before you stop.
 
-  * Your group shares {quota} GPU-hours for {assignment}, counted per node
-    per hour{node_note}. When they are gone, that is the end of the
-    assignment for your group. Stopping when nobody is using the machine is
-    how you make them last.
-
+  * Your group shares {quota} GPU-hours for {assignment}, counted per
+    node per hour. When they are gone, that is the end of the assignment
+    for your group. Stopping when nobody is using the machine is how you
+    make them last.{node_note}
+{starts_note}
   * Everything ends at the deadline:
     {deadline}
     After it, nothing starts and anything still running is destroyed.
@@ -134,12 +137,26 @@ def address(row, domain):
     return row["email"] or f"{row['student_id']}@{domain}"
 
 
-def live_config(api_url):
-    """Read the assignment, node count and deadline off the running service.
+# What a group actually gets when starts are rationed. Written from the
+# server's own max_starts, because the difference between "the hours are the
+# limit" and "you get ONE session, and stopping it ends the assignment" is the
+# difference between a group that plans and a group that finds out.
+STARTS_NOTE = """
+  * Your group gets {starts}. `stop` ends {it} for good and there is
+    no next one, so do not run it until you are finished - not overnight
+    and not "just to be safe". Hours left and no session means you are
+    stuck until you email the instructor.
+"""
 
-    So the mail cannot quote a deadline the deployment does not actually have.
-    Getting that wrong in fifty mailboxes is not something you can take back,
-    and it is exactly the sort of thing that drifts between an edit and a send.
+
+def live_config(api_url):
+    """Read the assignment, node count, budget, start limit and deadline off the
+    running service.
+
+    So the mail cannot quote a deadline, a budget or a ration the deployment
+    does not actually have. Getting that wrong in fifty mailboxes is not
+    something you can take back, and it is exactly the sort of thing that
+    drifts between an edit and a send.
     """
     with urllib.request.urlopen(api_url.rstrip("/") + "/healthz", timeout=15) as r:
         return json.loads(r.read())
@@ -171,14 +188,35 @@ def build(row, args, health):
     if args.reply_to:
         msg["Reply-To"] = args.reply_to
     nodes = health.get("nodes_per_group") or 1
+    # The server's own figure, so the mail cannot quote a budget the deployment
+    # does not have. --gpu-hours is the fallback for a service too old to
+    # publish it.
+    quota = health.get("gpu_hour_quota") or args.gpu_hours
+    # ":g" so a whole number reads as "20", not "20.0". The quota arrives as a
+    # float from JSON and "20.0 GPU-hours" looks like a rounding artefact.
+    quota = f"{quota:g}" if isinstance(quota, (int, float)) else quota
+    starts = health.get("max_starts") or 0
+    starts_note = "" if not starts else STARTS_NOTE.format(
+        starts="ONE session, total" if starts == 1 else f"{starts} sessions in total",
+        it="it" if starts == 1 else "one of them",
+    )
     msg.set_content(BODY.format(
         name=row["name"],
         course=args.course,
         assignment=health["assignment"],
         token=row["token"],
         group=row["group_id"],
-        quota=args.gpu_hours,
-        node_note="" if nodes == 1 else f", and your group gets {nodes} nodes at once",
+        quota=quota,
+        # Its own line rather than mid-sentence: this is plain text with a
+        # hand-wrapped body, so an inline clause of variable length is how you
+        # mail fifty people a 120-column paragraph.
+        node_note="" if nodes == 1 else (
+            f"\n    Your group gets {nodes} nodes at once, so one hour of running\n"
+            f"    costs {nodes} GPU-hours."
+        ),
+        starts_note=starts_note,
+        # The bullets below are counted, and one of them is conditional.
+        count="Four" if starts_note else "Three",
         deadline=health.get("deadline") or "none",
         cli_url=args.cli_url,
         signature=args.signature,
@@ -218,7 +256,9 @@ def main():
     ap.add_argument("--from", dest="sender", help="From: address (required with --send)")
     ap.add_argument("--reply-to")
     ap.add_argument("--course", default="CS 378")
-    ap.add_argument("--gpu-hours", default="20", help="GPULEASE_GPU_HOUR_QUOTA, for the text")
+    ap.add_argument("--gpu-hours", default="20",
+                    help="fallback only: the service publishes GPULEASE_GPU_HOUR_QUOTA "
+                         "on /healthz and that wins")
     ap.add_argument("--api-url", default=DEFAULT_API)
     ap.add_argument("--cli-url", default="the course page on Canvas",
                     help="where students download cli/gpulease.py")
@@ -260,7 +300,10 @@ def main():
 
     health = live_config(args.api_url)
     print(f"service: {args.api_url}  assignment={health['assignment']} "
-          f"nodes={health.get('nodes_per_group')} deadline={health.get('deadline')}")
+          f"nodes={health.get('nodes_per_group')} "
+          f"quota={health.get('gpu_hour_quota') or args.gpu_hours} "
+          f"max_starts={health.get('max_starts') or 'unlimited'} "
+          f"deadline={health.get('deadline')}")
     scope = "student(s) on the roster with a token" if args.roster else "token(s) to mail"
     print(f"{len(recipients)} {scope}, {len(done)} already sent, {len(pending)} to go\n")
     if not pending:
