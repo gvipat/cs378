@@ -105,17 +105,37 @@ fi
 # being fatal when the tags never turn up: a student with no peers file still
 # has a working machine.
 IMDS=http://169.254.169.254/latest
-TOKEN=$(curl -sf -X PUT --max-time 2 "$IMDS/api/token" \\
-  -H 'X-aws-ec2-metadata-token-ttl-seconds: 300' || echo "")
+TOKEN=""
+imds_token() {
+  curl -sf -X PUT --max-time 5 "$IMDS/api/token" \\
+    -H 'X-aws-ec2-metadata-token-ttl-seconds: 300' || true
+}
 meta() {
-  curl -sf --max-time 2 -H "X-aws-ec2-metadata-token: $TOKEN" "$IMDS/meta-data/$1" || true
+  curl -sf --max-time 5 -H "X-aws-ec2-metadata-token: $TOKEN" "$IMDS/meta-data/$1" || true
 }
 
+# The token is fetched INSIDE the loop, once per attempt. It used to be fetched
+# once above it, and that was a silent single point of failure: bootcmd runs
+# while the network is still coming up, so the token PUT can time out, and an
+# empty token makes every later read a 401. The twenty retries below then could
+# not recover -- they kept presenting the same empty token -- and the node came
+# up with no peer list, no MASTER_ADDR and a motd claiming it was alone.
+#
+# Not theoretical. Caught in the act on a live instance: cloud-init logged
+# `config-bootcmd ran successfully and took 60.838 seconds`, the full retry
+# budget, having read nothing, on a box whose NodePeers tag answered instantly
+# from the same command a few minutes later.
+#
+# 5s rather than 2s for the same reason -- early boot is exactly when the stack
+# is slowest and a 2s ceiling is tightest.
 PEERS=""
 TRIES=0
 while [ "$TRIES" -lt 20 ]; do
-  PEERS=$(meta tags/instance/NodePeers)
-  if [ -n "$PEERS" ]; then break; fi
+  TOKEN=$(imds_token)
+  if [ -n "$TOKEN" ]; then
+    PEERS=$(meta tags/instance/NodePeers)
+    if [ -n "$PEERS" ]; then break; fi
+  fi
   TRIES=$((TRIES + 1))
   sleep 2
 done
