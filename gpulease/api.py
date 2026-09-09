@@ -117,11 +117,19 @@ def _ends_because(row):
 
 @app.get("/healthz")
 def healthz():
+    # Unauthenticated, but nothing here is a secret: it is the same policy every
+    # student already reads off `gpulease status`. mail_tokens.py quotes the
+    # assignment, node count, budget and deadline to the whole class in one
+    # unrecallable send, so it takes all four from here rather than from its own
+    # defaults -- a number that drifts between an edit and a send is exactly the
+    # mistake you cannot take back out of fifty mailboxes.
     return {
         "ok": True,
         "course": config.COURSE,
         "assignment": config.ACTIVE_ASSIGNMENT,
         "nodes_per_group": config.NODES_PER_GROUP,
+        "gpu_hour_quota": config.GPU_HOUR_QUOTA,
+        "max_starts": config.MAX_STARTS,
         "deadline": config.deadline_str(),
     }
 
