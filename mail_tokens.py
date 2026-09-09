@@ -42,40 +42,44 @@ DEFAULT_API = "https://utcs378-infra.duckdns.org"
 # column in the roster wins over it, so a roster carrying real addresses needs
 # no flag.
 DEFAULT_DOMAIN = "my.utexas.edu"
+# The one link in the mail. It carries the assignment AND the CLI
+# (resource_request/gpulease.py), so there is nothing else to hand out and no
+# second copy of the CLI to drift from this repo's cli/gpulease.py.
+DEFAULT_REPO = "https://github.com/utcs378/assignment1-template"
 
-SUBJECT = "Your {course} GPU token ({assignment})"
+SUBJECT = "{course} {assignment} token and instructions"
 
 BODY = """\
 Hi {name},
 
-Here is your personal token for the {course} GPU lease service. It is yours
-alone - do not share it or paste it into a group chat. Anyone who has it can
-start and stop your group's nodes and destroy what is on them.
+{assignment} is out. Everything is in the template repo - the assignment,
+the setup steps, and the resource lease CLI at resource_request/gpulease.py:
+
+  {repo_url}
+
+Create a PRIVATE repository from that template, clone it, and run the CLI
+from your clone. The token below is yours alone - do not share it or paste
+it into a group chat. Anyone who has it can start and stop your group's
+nodes and destroy what is on them.
 
   token    {token}
   group    {group}
 
-Getting started - you need Python 3.9+.
+With Python 3.9+ (on Windows, type `py` where this says `python3`):
 
-  1. Get gpulease.py: {cli_url}
-  2. python3 gpulease.py login {token}
-  3. python3 gpulease.py start     # a few minutes, then an ssh line per node
-     python3 gpulease.py status    # check on it any time
-     python3 gpulease.py stop      # when you are done - idle nodes still bill
+  python3 resource_request/gpulease.py login {token}
+  python3 resource_request/gpulease.py start   # then an ssh line per node
+  python3 resource_request/gpulease.py stop    # idle nodes still bill
 
-  On Windows, type `py` everywhere this says `python3` - the python.org
-  installer does not give you a `python3` command.
-
-{count} Warnings:
+Warnings:
 
   * YOUR NODES ARE TEMPORARY. `stop`, the end of your lease and the
-    assignment deadline all destroy them AND their disks. Nothing is backed
-    up and nothing carries over. Work in git and push before you stop.
+    deadline all destroy them AND their disks. Nothing is backed up. Work
+    in git and push before you stop.
 
-  * Your group shares {quota} GPU-hours for {assignment}, counted per
-    node per hour. When they are gone, that is the end of the assignment
-    for your group. Stopping when nobody is using the machine is how you
-    make them last.{node_note}
+  * Your group shares {quota} GPU-hours for {assignment}, counted per node
+    per hour. When they are gone, that is the end of the assignment for
+    your group.{node_note}
 {starts_note}
   * Everything ends at the deadline:
     {deadline}
@@ -215,10 +219,8 @@ def build(row, args, health):
             f"    costs {nodes} GPU-hours."
         ),
         starts_note=starts_note,
-        # The bullets below are counted, and one of them is conditional.
-        count="Four" if starts_note else "Three",
         deadline=health.get("deadline") or "none",
-        cli_url=args.cli_url,
+        repo_url=args.repo_url,
         signature=args.signature,
     ))
     if args.attach:
@@ -260,9 +262,10 @@ def main():
                     help="fallback only: the service publishes GPULEASE_GPU_HOUR_QUOTA "
                          "on /healthz and that wins")
     ap.add_argument("--api-url", default=DEFAULT_API)
-    ap.add_argument("--cli-url", default="the course page on Canvas",
-                    help="where students download cli/gpulease.py")
-    ap.add_argument("--attach", help="attach this file (e.g. cli/gpulease.py)")
+    ap.add_argument("--repo-url", default=DEFAULT_REPO,
+                    help="the assignment template students work from; it ships the "
+                         f"CLI at resource_request/gpulease.py (default {DEFAULT_REPO})")
+    ap.add_argument("--attach", help="attach this file")
     ap.add_argument("--domain", default=DEFAULT_DOMAIN,
                     help=f"student addresses are <student_id>@DOMAIN (default {DEFAULT_DOMAIN})")
     ap.add_argument("--to", metavar="ADDRESS",
