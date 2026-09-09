@@ -55,7 +55,7 @@ start and stop your group's nodes and destroy what is on them.
   token    {token}
   group    {group}
 
-Getting started - you need Python 3.9+ and nothing else. No AWS account:
+Getting started - you need Python 3.9+.
 
   1. Get gpulease.py: {cli_url}
   2. python3 gpulease.py login {token}
@@ -66,7 +66,7 @@ Getting started - you need Python 3.9+ and nothing else. No AWS account:
   On Windows, type `py` everywhere this says `python3` - the python.org
   installer does not give you a `python3` command.
 
-{count} things that will save you a bad afternoon:
+{count} Warnings:
 
   * YOUR NODES ARE TEMPORARY. `stop`, the end of your lease and the
     assignment deadline all destroy them AND their disks. Nothing is backed
