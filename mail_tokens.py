@@ -92,7 +92,7 @@ Warnings:
     {deadline}
     After it, nothing starts and anything still running is destroyed.
 
-`stop` ends the session for your whole group, so tell them before you run it.
+    * `stop` ends the session for your whole group, so tell them before you run it.
 
 {signature}
 """
@@ -310,7 +310,7 @@ def main():
     ap.add_argument("--to", metavar="ADDRESS",
                     help="smoke test: send every message to this address instead of the "
                          "student. Not written to the sent log, so the real send still goes")
-    ap.add_argument("--signature", default="-- \nthe course staff")
+    ap.add_argument("--signature", default="-- \nCS 378 course staff")
     ap.add_argument("--smtp-host", default="smtp.gmail.com")
     ap.add_argument("--smtp-port", type=int, default=587)
     ap.add_argument("--smtp-user", help="default: the --from address")
