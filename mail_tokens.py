@@ -34,7 +34,7 @@ import ssl
 import sys
 import time
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.message import EmailMessage
 from getpass import getpass
 from pathlib import Path
@@ -52,6 +52,15 @@ DEFAULT_REPO = "https://github.com/utcs378/assignment1-template"
 # and how it is graded, so the mail names both rather than making students
 # find one from the other.
 DEFAULT_PAGE = "https://utcs378.github.io/fall26/assignments/assignment1"
+
+# The mail quotes the last minute a node is still alive, not the instant it
+# dies. A cutoff written as 00:00 has no unambiguous plain-English form --
+# "12:00 AM on Tuesday" reads to half a class as the END of Tuesday, a whole
+# day's misunderstanding -- so the mail names the minute before: the same
+# boundary, from the side the student is standing on. /healthz, `gpulease
+# status` and api.start's refusal all quote the cutoff itself, so the mail is
+# deliberately one minute earlier than they are. Set to 0 to quote it exactly.
+DISPLAY_LEAD = timedelta(minutes=1)
 
 SUBJECT = "{course} {assignment} token and instructions"
 
@@ -198,23 +207,17 @@ def plain_deadline(s):
     configured in -- exactly the wall clock we want -- and an unrecognised
     shape falls through unchanged rather than inventing a date.
 
-    Midnight is spelled out. "12:00 AM on Tuesday" reads to half a class as
-    the END of Tuesday, which is a whole day's misunderstanding about when
-    their nodes disappear.
+    DISPLAY_LEAD is then subtracted; see the note on it for why the mail
+    deliberately reads one minute earlier than every other surface.
     """
     m = re.match(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2})", s or "")
     if not m:
         return s
-    dt = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M")
+    dt = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M") - DISPLAY_LEAD
     # -05:00 is CDT and -06:00 is CST; students say "CT" for both.
     zone = "CT" if ("-05:00" in s or "-06:00" in s) else "UTC"
-    day = f"{dt:%A}, {dt:%B} {_ordinal(dt.day)}"
-    if (dt.hour, dt.minute) == (0, 0):
-        return f"midnight {zone} at the start of {day}"
-    if (dt.hour, dt.minute) == (12, 0):
-        return f"noon {zone} on {day}"
     clock = f"{dt.strftime('%I').lstrip('0')}:{dt:%M} {dt:%p}"
-    return f"{clock} {zone} on {day}"
+    return f"{clock} {zone} on {dt:%A}, {dt:%B} {_ordinal(dt.day)}"
 
 
 def build(row, args, health):
