@@ -61,7 +61,8 @@ Hi {name},
   webpage  {page_url}
   code        {repo_url}
 
-You can use the token below to request resources for your group by following the instructions on the webpage.
+You can use the token below to request resources for your group by following 
+the instructions on the webpage.
 This token is yours alone - do not share it with anyone. Anyone who has it 
 can start and stop your group's nodes and destroy what is on them.
 
