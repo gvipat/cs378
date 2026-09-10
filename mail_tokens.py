@@ -62,7 +62,7 @@ DEFAULT_PAGE = "https://utcs378.github.io/fall26/assignments/assignment1"
 # deliberately one minute earlier than they are. Set to 0 to quote it exactly.
 DISPLAY_LEAD = timedelta(minutes=1)
 
-SUBJECT = "{course} {assignment} token and instructions"
+SUBJECT = "{course} {assignment} token"
 
 BODY = """\
 Hi {name},
