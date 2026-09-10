@@ -28,11 +28,13 @@ import argparse
 import csv
 import json
 import os
+import re
 import smtplib
 import ssl
 import sys
 import time
 import urllib.request
+from datetime import datetime
 from email.message import EmailMessage
 from getpass import getpass
 from pathlib import Path
@@ -58,12 +60,12 @@ Hi {name},
 
 {assignment} is out.
 
-  webpage  {page_url}
+  webpage     {page_url}
   code        {repo_url}
 
-You can use the token below to request resources for your group by following 
+You can use the token below to request resources for your group by following
 the instructions on the webpage.
-This token is yours alone - do not share it with anyone. Anyone who has it 
+This token is yours alone - do not share it with anyone. Anyone who has it
 can start and stop your group's nodes and destroy what is on them.
 
   token       {token}
@@ -180,6 +182,41 @@ def redact(token):
     return token.split(".", 1)[0] + "." + "*" * 12
 
 
+def _ordinal(n):
+    suffix = "th" if 11 <= n % 100 <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def plain_deadline(s):
+    """`deadline_str()`'s output -> a wall clock a student reads without doing
+    arithmetic: "11:59 PM CT on Monday, September 21st".
+
+    Parsed from whatever /healthz sent rather than typed here, for the same
+    reason the quota is: a date retyped by hand is a date that can disagree
+    with the one the service actually enforces, in fifty mailboxes at once.
+    The leading "YYYY-MM-DD HH:MM" is the cutoff in the offset it was
+    configured in -- exactly the wall clock we want -- and an unrecognised
+    shape falls through unchanged rather than inventing a date.
+
+    Midnight is spelled out. "12:00 AM on Tuesday" reads to half a class as
+    the END of Tuesday, which is a whole day's misunderstanding about when
+    their nodes disappear.
+    """
+    m = re.match(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2})", s or "")
+    if not m:
+        return s
+    dt = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M")
+    # -05:00 is CDT and -06:00 is CST; students say "CT" for both.
+    zone = "CT" if ("-05:00" in s or "-06:00" in s) else "UTC"
+    day = f"{dt:%A}, {dt:%B} {_ordinal(dt.day)}"
+    if (dt.hour, dt.minute) == (0, 0):
+        return f"midnight {zone} at the start of {day}"
+    if (dt.hour, dt.minute) == (12, 0):
+        return f"noon {zone} on {day}"
+    clock = f"{dt.strftime('%I').lstrip('0')}:{dt:%M} {dt:%p}"
+    return f"{clock} {zone} on {day}"
+
+
 def build(row, args, health):
     msg = EmailMessage()
     msg["Subject"] = SUBJECT.format(course=args.course, assignment=health["assignment"])
@@ -215,7 +252,7 @@ def build(row, args, health):
             f"    costs {nodes} GPU-hours."
         ),
         starts_note=starts_note,
-        deadline=health.get("deadline") or "none",
+        deadline=plain_deadline(health.get("deadline") or "none"),
         repo_url=args.repo_url,
         page_url=args.page_url,
         signature=args.signature,
