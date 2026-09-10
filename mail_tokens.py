@@ -82,17 +82,20 @@ can start and stop your group's nodes and destroy what is on them.
 
 Warnings:
 
-  * YOUR NODES ARE TEMPORARY. `stop`, the end of your lease and the deadline
-    all destroy them AND their disks. Work in git and push before you stop.
+  * YOUR NODES ARE TEMPORARY. Releasing them, the end of your lease and the
+    deadline all destroy them AND their disks. Nothing is backed up, so work
+    in git and push before you finish for the day.
 
-  * Your group shares {quota} GPU-hours, counted per node per hour. When they
-    are gone, that is the end of the assignment for your group.{node_note}
+  * Your group shares {quota} GPU-hours, counted per node per hour, and idle
+    nodes bill the same as busy ones. When the hours are gone, that is the
+    end of the assignment for your group.{node_note}
 {starts_note}
   * Everything ends at the deadline:
     {deadline}
     After it, nothing starts and anything still running is destroyed.
 
-    * `stop` ends the session for your whole group, so tell them before you run it.
+  * Releasing the nodes ends the session for your whole group, not just for
+    you - check with them first.
 
 {signature}
 """
@@ -153,10 +156,10 @@ def address(row, domain):
 # limit" and "you get ONE session, and stopping it ends the assignment" is the
 # difference between a group that plans and a group that finds out.
 STARTS_NOTE = """
-  * Your group gets {starts}. `stop` ends {it} for good and there is
-    no next one, so do not run it until you are finished - not overnight
-    and not "just to be safe". Hours left and no session means you are
-    stuck until you email the instructor.
+  * Your group gets {starts}.
+    Releasing the nodes ends {it} for good, so do not release until you
+    are finished - not overnight and not "just to be safe". Hours left
+    and no session means you are stuck until you email the instructor.
 """
 
 
