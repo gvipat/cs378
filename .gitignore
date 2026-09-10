@@ -16,6 +16,10 @@ var/
 tokens.csv
 roster.csv
 *.csv
+# ...and their backups. `*.csv` does NOT match tokens.csv.bak or roster.csv~,
+# and a stray backup is the same 53 live credentials as the original.
+*.csv.*
+*.csv~
 !test-roster.csv
 
 # build/deploy artifacts

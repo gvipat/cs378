@@ -46,50 +46,45 @@ DEFAULT_DOMAIN = "my.utexas.edu"
 # (resource_request/gpulease.py), so there is nothing else to hand out and no
 # second copy of the CLI to drift from this repo's cli/gpulease.py.
 DEFAULT_REPO = "https://github.com/utcs378/assignment1-template"
+# The spec itself. The repo carries the code; this carries what to do with it
+# and how it is graded, so the mail names both rather than making students
+# find one from the other.
+DEFAULT_PAGE = "https://utcs378.github.io/fall26/assignments/assignment1"
 
 SUBJECT = "{course} {assignment} token and instructions"
 
 BODY = """\
 Hi {name},
 
-{assignment} is out. Everything is in the template repo - the assignment,
-the setup steps, and the resource lease CLI at resource_request/gpulease.py:
+{assignment} is out.
 
-  {repo_url}
+  webpage  {page_url}
+  code        {repo_url}
 
-Create a PRIVATE repository from that template, clone it, and run the CLI
-from your clone. The token below is yours alone - do not share it or paste
-it into a group chat. Anyone who has it can start and stop your group's
-nodes and destroy what is on them.
+You can use the token below to request resources for your group by following the instructions on the webpage.
+This token is yours alone - do not share it with anyone. Anyone who has it 
+can start and stop your group's nodes and destroy what is on them.
 
-  token    {token}
-  group    {group}
-
-With Python 3.9+ (on Windows, type `py` where this says `python3`):
-
-  python3 resource_request/gpulease.py login {token}
-  python3 resource_request/gpulease.py start   # then an ssh line per node
-  python3 resource_request/gpulease.py stop    # idle nodes still bill
+  token       {token}
+  group       {group}
 
 Warnings:
 
-  * YOUR NODES ARE TEMPORARY. `stop`, the end of your lease and the
-    deadline all destroy them AND their disks. Nothing is backed up. Work
-    in git and push before you stop.
+  * YOUR NODES ARE TEMPORARY. `stop`, the end of your lease and the deadline
+    all destroy them AND their disks. Work in git and push before you stop.
 
-  * Your group shares {quota} GPU-hours for {assignment}, counted per node
-    per hour. When they are gone, that is the end of the assignment for
-    your group.{node_note}
+  * Your group shares {quota} GPU-hours, counted per node per hour. When they
+    are gone, that is the end of the assignment for your group.{node_note}
 {starts_note}
   * Everything ends at the deadline:
     {deadline}
     After it, nothing starts and anything still running is destroyed.
 
-`stop` ends the session for your whole group, not just for you, so tell them
-before you run it.
+`stop` ends the session for your whole group, so tell them before you run it.
 
 {signature}
 """
+
 
 
 def die(msg):
@@ -221,6 +216,7 @@ def build(row, args, health):
         starts_note=starts_note,
         deadline=health.get("deadline") or "none",
         repo_url=args.repo_url,
+        page_url=args.page_url,
         signature=args.signature,
     ))
     if args.attach:
@@ -262,6 +258,8 @@ def main():
                     help="fallback only: the service publishes GPULEASE_GPU_HOUR_QUOTA "
                          "on /healthz and that wins")
     ap.add_argument("--api-url", default=DEFAULT_API)
+    ap.add_argument("--page-url", default=DEFAULT_PAGE,
+                    help=f"the assignment write-up (default {DEFAULT_PAGE})")
     ap.add_argument("--repo-url", default=DEFAULT_REPO,
                     help="the assignment template students work from; it ships the "
                          f"CLI at resource_request/gpulease.py (default {DEFAULT_REPO})")
