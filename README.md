@@ -739,12 +739,16 @@ the separate `{course}-instances` group, which is what
 control plane tags each instance with `NodeIndex` and `NodePeers` (the private
 addresses of the whole group). The instance reads them back from instance
 metadata with `InstanceMetadataTags` enabled — link-local, no AWS keys, no call
-home — and `bootcmd` turns them into `/etc/gpulease/peers`, an
-`/etc/gpulease/hostfile` for mpirun, `node0`/`node1` entries in `/etc/hosts`,
-and `MASTER_ADDR` / `MASTER_PORT` / `NODE_RANK` / `NNODES` in
-`/etc/profile.d`. The tags are written moments after `RunInstances` returns, so
-a boot can lose that race and the boot script retries for ~40s — and every boot
-is a first boot now. `WORLD_SIZE` and `RANK` are deliberately *not*
+home — and a background unit, `gpulease-peers`, turns them into
+`/etc/gpulease/peers`, an `/etc/gpulease/hostfile` for mpirun, `node0`/`node1`
+entries in `/etc/hosts`, and `MASTER_ADDR` / `MASTER_PORT` / `NODE_RANK` /
+`NNODES` in `/etc/gpulease/env`, which `/etc/profile.d/gpulease-cluster.sh`
+sources. The tags are added by `CreateTags` after `RunInstances` returns, and
+IMDS can take minutes to show them (tags passed to `RunInstances` itself are
+there at once), so `bootcmd` only starts that unit and it retries for up to
+15 minutes. Until it finishes, a login prints a "cluster info is not available
+yet" notice instead of leaving the variables empty; `journalctl -u
+gpulease-peers` shows what it found. `WORLD_SIZE` and `RANK` are deliberately *not*
 exported — torchrun sets those per process and a stale value in the environment
 breaks the job confusingly.
 
@@ -988,9 +992,10 @@ With `GPULEASE_NODES_PER_GROUP` above 1, also:
     `echo $MASTER_ADDR $NODE_RANK $NNODES` is populated. On node1, `NODE_RANK`
     is 1 and `MASTER_ADDR` is unchanged. If the peers file is missing, the
     instance did not get tags through IMDS — check that `RunInstances` still
-    passes `InstanceMetadataTags: enabled`. Every node is freshly launched, so
-    every boot races the tag write; the boot script retries for ~40s, and this
-    is the item that catches a regression in that retry.
+    passes `InstanceMetadataTags: enabled`, and `journalctl -u gpulease-peers`
+    on the node. The tags can take minutes to reach IMDS, so give a fresh
+    node a few minutes before calling it a failure; this is the item that
+    catches a regression in that background lookup.
 18. **They can actually talk.** From node0, `nc -vz node1 29500` after
     `nc -l 29500` on node1. This is the per-group security group doing its job;
     it is the thing that silently breaks if the cluster group is not attached.

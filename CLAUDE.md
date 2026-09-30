@@ -330,10 +330,13 @@ launch, `aws.launch_cluster` tags each instance with `NodeIndex` and
 `bootcmd` can read them back over link-local. This is what keeps "student
 instances hold no AWS credentials" true while still giving them a peer list.
 Do not replace it with a call back to the control plane, an instance profile,
-or an agent. One consequence worth remembering: the tags land a moment *after*
-`RunInstances` returns, so a boot can lose the race — and every boot is a first
-boot now, since nothing is ever resumed. The boot script retries for ~40s and
-treats a miss as non-fatal.
+or an agent. One consequence worth remembering: `CreateTags` runs *after*
+`RunInstances` returns, and IMDS can take minutes to show those tags — both
+nodes of a lease once missed them for the whole ~50s the old inline bootcmd
+retry allowed. So `bootcmd` does not look them up itself: it starts a
+background `gpulease-peers` unit that retries for up to 15 minutes, and the
+profile.d shim warns at login until `/etc/gpulease/env` exists. Do not move
+the lookup back into bootcmd; cloud-init (and the user's SSH key) waits on it.
 
 **Every node gets identical user-data**, so one session key opens the whole
 cluster and `ssh -A` hops between them. Do not personalise the payload per
