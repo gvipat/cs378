@@ -81,6 +81,19 @@
       "Resource": "arn:aws:ec2:*:*:vpc/*"
     },
     {
+      "Sid": "BedrockInvokeCourseModels",
+      "Effect": "Allow",
+      "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+      "Resource": [
+        "arn:aws:bedrock:us-west-2:*:inference-profile/global.anthropic.claude-haiku-5-5",
+        "arn:aws:bedrock:us-west-2:*:inference-profile/global.anthropic.claude-sonnet-5-5",
+        "arn:aws:bedrock:us-west-2:*:inference-profile/global.anthropic.claude-opus-5-5",
+        "arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-5-5",
+        "arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-5-5",
+        "arn:aws:bedrock:*::foundation-model/anthropic.claude-opus-5-5"
+      ]
+    },
+    {
       "Sid": "ManageIngressOnCourseSecurityGroups",
       "Effect": "Allow",
       "Action": ["ec2:AuthorizeSecurityGroupIngress", "ec2:RevokeSecurityGroupIngress"],

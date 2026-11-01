@@ -5,6 +5,8 @@ __pycache__/
 # local config and state
 gpulease.env
 var/
+# the LLM proxy's master key, salt key and database password
+litellm/litellm.env
 
 # secrets and PII - never commit these.
 #

@@ -28,3 +28,17 @@
 utcs378-infra.duckdns.org {
 	reverse_proxy 127.0.0.1:8000
 }
+
+# The LiteLLM proxy (litellm/). DuckDNS answers for every name under ours, so
+# this needs no DNS record of its own. Only the paths a student's client calls
+# are forwarded: the admin API, the UI, and the provider pass-through routes
+# all 404 here, so a leaked master key is useless from outside. Admin work goes
+# over `ssh -L 4000:localhost:4000`. If a student's framework 404s on a path
+# that is not admin, add it to @student.
+llm.utcs378-infra.duckdns.org {
+	@student path /v1/* /chat/completions /completions /embeddings /models /key/info /health/readiness
+	handle @student {
+		reverse_proxy 127.0.0.1:4000
+	}
+	respond 404
+}

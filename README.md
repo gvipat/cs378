@@ -663,6 +663,107 @@ fleet in step 1 is fully terminated, not merely stopped.
 
 ---
 
+## LLM proxy
+
+For assignments that need model API access rather than GPUs, the lease host
+also runs a [LiteLLM](https://docs.litellm.ai/) proxy in front of Amazon
+Bedrock (`litellm/`). It is a separate service that shares the host and Caddy
+with gpu-lease and nothing else: its own systemd unit, its own Postgres, no
+access to `var/gpulease.db`.
+
+- **Students hold LiteLLM virtual keys** (`sk-...`), never AWS credentials. The
+  proxy calls Bedrock with the host's instance role, which may invoke only the
+  three models in `litellm/config.yaml`.
+- **Each group is a LiteLLM team with a USD cap.** Members' keys draw on the
+  shared team budget; once it is spent, every request from that group is
+  refused until you raise it. It can overshoot by roughly one in-flight
+  request per key.
+- **Only the student paths are reachable.** `llm.utcs378-infra.duckdns.org`
+  forwards `/v1/*` and a few OpenAI-compatible aliases; the admin API and UI
+  404. You manage keys on the host, or over `ssh -L 4000:localhost:4000`.
+
+### Install
+
+The host needs the `BedrockInvokeCourseModels` statement from
+`iam-policy.json` on its role (re-apply the policy as in Install, step 2), and
+roughly 1 GB of free RAM and 2 GB of disk beyond what gpu-lease uses: a
+t3.medium with a 20 GB root, not the t3.small the gpu-lease install alone
+needs.
+
+```bash
+cd ~/cs378 && git pull
+sudo ./litellm/setup.sh             # Postgres, LiteLLM, litellm.service
+sudo cp Caddyfile.example /etc/caddy/Caddyfile
+sudo systemctl reload caddy
+curl -s https://llm.utcs378-infra.duckdns.org/health/readiness
+```
+
+`setup.sh` creates `litellm/litellm.env` (mode 600) with a random master key,
+salt key and database password on first run and never again. Back it up: a
+replacement salt key makes what LiteLLM has stored in the database unreadable.
+
+### Keys and budgets
+
+```bash
+./litellm/keys.py mint roster.csv --budget 50        # $50 per group, total
+./litellm/keys.py mint roster.csv --budget 10 --duration 7d   # or $10 a week
+./litellm/keys.py show                               # spend and cap per group
+./litellm/keys.py budget 7 --usd 80                  # change group 7's cap
+./litellm/keys.py revoke abc123                      # block a key; restore undoes
+./litellm/keys.py mint roster.csv --rotate           # reissue everyone's key
+```
+
+`mint` behaves like `admin.py roster`: it writes `llm-tokens.csv` (0600) with
+only the keys it just issued, re-running it skips students who already have
+one, and LiteLLM keeps only a hash, so that file is the only copy. `--budget`
+applies to groups that do not have a team yet; use `budget` to change an
+existing one. Defaults per key: 120 requests/minute, 16 concurrent.
+
+### What students set
+
+```bash
+export AGENTKV_LLM_URL=https://llm.utcs378-infra.duckdns.org
+export AGENTKV_LLM_KEY=sk-...                    # from llm-tokens.csv
+export AGENTKV_BEDROCK_MODEL=global.anthropic.claude-sonnet-5-5
+```
+
+Model ids are the Bedrock inference-profile ids: `global.anthropic.claude-haiku-5-5`,
+`global.anthropic.claude-sonnet-5-5`, `global.anthropic.claude-opus-5-5`. Any
+OpenAI-compatible client works with base URL `$AGENTKV_LLM_URL/v1` and the key.
+A student checks their group's spend with:
+
+```bash
+curl -s $AGENTKV_LLM_URL/key/info -H "Authorization: Bearer $AGENTKV_LLM_KEY"
+```
+
+### Prices
+
+LiteLLM bills each request at the per-token prices in `litellm/config.yaml`,
+set from the AWS Price List rather than LiteLLM's cost map: the pinned release
+predates these models, and a model it cannot price is recorded at $0, which
+means no budget ever trips. If you add a model, add its prices, make one call,
+and check that `keys.py show` moved.
+
+### The host's address
+
+The lease host has an auto-assigned public IP, not an Elastic IP. A reboot
+keeps it; a stop/start (an instance-type change, for one) does not, and nothing
+updates DuckDNS for you. After one, point `utcs378-infra.duckdns.org` at the new
+address in the DuckDNS dashboard; `llm.` follows.
+
+### Removing it
+
+```bash
+sudo systemctl disable --now litellm
+sudo rm /etc/systemd/system/litellm.service && sudo systemctl daemon-reload
+# drop the llm.* block from /etc/caddy/Caddyfile, then reload caddy
+sudo -u postgres dropdb litellm && sudo -u postgres dropuser litellm
+```
+
+Then remove `BedrockInvokeCourseModels` from the role policy.
+
+---
+
 ## How it works
 
 **Two things can spend money, and only one of them is reachable by students.**
@@ -832,6 +933,8 @@ setup.sh        the installer
 iam-policy.json permissions for the lease host
 gpulease.env    your config; gpulease.env.example is the annotated template
 var/gpulease.db the whole system state, created 0600
+litellm/        the LLM proxy: config.yaml, setup.sh, keys.py; litellm.env
+                (generated, 0600) holds its master key
 ```
 
 Three tables in that database: `students` (token hashes, group membership),

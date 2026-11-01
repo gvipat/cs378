@@ -39,7 +39,10 @@ admin.py        instructor tools (roster, sessions, instances, kill, reap,
                 disable/enable)
 setup.sh        the installer; idempotent, safe to re-run
 iam-policy.json permissions for the lease host
-Caddyfile.example the TLS terminator in front of the API; copy to /etc/caddy
+Caddyfile.example the TLS terminator in front of the API and the LLM proxy;
+                copy to /etc/caddy
+litellm/        the LLM proxy (see "LLM proxy" below): config.yaml, setup.sh,
+                keys.py; litellm.env is generated, 0600, gitignored
 gpulease.env    local, gitignored; gpulease.env.example is the template
 gpulease.env.test  t3.micro + minutes, for the manual checklist. Selected with
                 GPULEASE_ENV=gpulease.env.test, which REPLACES gpulease.env
@@ -122,6 +125,12 @@ journalctl -u gpulease -f
 
 curl -s localhost:8000/healthz      # on the host; the API binds to localhost
 sudo systemctl reload caddy         # after editing /etc/caddy/Caddyfile
+
+# LLM proxy, on the lease host
+sudo ./litellm/setup.sh             # install or re-install
+journalctl -u litellm -f
+./litellm/keys.py mint roster.csv --budget 50   # teams + keys -> llm-tokens.csv
+./litellm/keys.py show              # spend per group
 
 # CLI
 GPULEASE_API=https://host python3 cli/gpulease.py login <token> | start | status | stop
@@ -405,6 +414,39 @@ ec2:CreateSecurityGroup action" and is almost always a tag mismatch rather than
 a missing permission.
 `NODES_PER_GROUP` is validated at import against `MAX_NODES_PER_GROUP` (8) and
 refuses to start outside it — a typo there is a bill, not a warning.
+
+## LLM proxy
+
+`litellm/` is a LiteLLM proxy in front of Bedrock, for assignments that need
+model API access instead of GPUs. It is a **separate service that shares the
+host and Caddy with gpu-lease and nothing else** — its own systemd unit
+(`litellm.service`, 127.0.0.1:4000), its own Postgres database, its own
+installer. None of the gpu-lease invariants above change because of it, and
+nothing in `gpulease/` should import from or know about it.
+
+- **Students hold LiteLLM virtual keys, never AWS credentials.** The proxy uses
+  the host's instance role; `BedrockInvokeCourseModels` in `iam-policy.json`
+  lets it invoke exactly the models in `litellm/config.yaml`. Adding a model
+  means both files.
+- **Every model in `config.yaml` carries explicit per-token prices.** A model
+  LiteLLM's cost map does not know is billed at $0 and no budget ever trips.
+  The pinned release predates the current models, so do not delete the
+  `model_info` blocks as redundant.
+- **Budgets are per group**: one team per `group_id` (`group-<id>`), the cap on
+  the team, student keys under it with no cap of their own. `keys.py` is the
+  only tool that creates or changes them.
+- **Caddy forwards only student paths** to it (`/v1/*` and a few aliases). The
+  admin API, the UI and the provider pass-through routes 404 from outside; do
+  not widen that to a blocklist.
+- **`litellm.env` is created once and never regenerated.** A new
+  `LITELLM_SALT_KEY` makes everything LiteLLM encrypted in its database
+  unreadable.
+- `setup.sh` installs `litellm[proxy,extra_proxy]` and runs `prisma generate`;
+  `[proxy]` alone starts and then dies on a missing `prisma` module. The unit
+  puts the venv on `PATH` because the startup migrations call the prisma CLI.
+
+The lease host's public IP is auto-assigned, not an Elastic IP: a stop/start
+changes it and DuckDNS has to be repointed by hand.
 
 ## Data model
 

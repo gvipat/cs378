@@ -1,0 +1,60 @@
+# LiteLLM proxy config: Bedrock models behind per-group budgets.
+# Installed by litellm/setup.sh; read by litellm.service. A restart applies it.
+#
+# model_name is the Bedrock inference-profile id itself, so students pass a
+# real Bedrock id (the assignment's report asks for one) and OpenAI-compatible
+# frameworks use the same string.
+#
+# Prices are spelled out rather than taken from LiteLLM's cost map: the pinned
+# release predates these models, and a model the map does not know is billed at
+# $0 -- which means no budget ever trips. Figures are Bedrock us-west-2, global
+# cross-region profiles (10% cheaper than us.*), from the AWS Price List,
+# 2026-10-31. If you add a model, add its prices, then check /key/info shows
+# nonzero spend after one call.
+
+model_list:
+  - model_name: global.anthropic.claude-haiku-5-5
+    litellm_params:
+      model: bedrock/global.anthropic.claude-haiku-5-5
+      aws_region_name: us-west-2
+    model_info:
+      input_cost_per_token: 1.0e-7
+      output_cost_per_token: 5.0e-7
+      cache_read_input_token_cost: 1.0e-8
+      cache_creation_input_token_cost: 1.25e-7
+      # Haiku 5.5 prompts over 100K tokens bill at 5x.
+      input_cost_per_token_above_100k_tokens: 5.0e-7
+      output_cost_per_token_above_100k_tokens: 2.5e-6
+      cache_read_input_token_cost_above_100k_tokens: 5.0e-8
+      cache_creation_input_token_cost_above_100k_tokens: 6.25e-7
+
+  - model_name: global.anthropic.claude-sonnet-5-5
+    litellm_params:
+      model: bedrock/global.anthropic.claude-sonnet-5-5
+      aws_region_name: us-west-2
+    model_info:
+      input_cost_per_token: 2.0e-6
+      output_cost_per_token: 1.0e-5
+      cache_read_input_token_cost: 1.0e-7
+      cache_creation_input_token_cost: 2.5e-6
+
+  - model_name: global.anthropic.claude-opus-5-5
+    litellm_params:
+      model: bedrock/global.anthropic.claude-opus-5-5
+      aws_region_name: us-west-2
+    model_info:
+      input_cost_per_token: 4.0e-6
+      output_cost_per_token: 2.0e-5
+      cache_read_input_token_cost: 2.0e-7
+      cache_creation_input_token_cost: 5.0e-6
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+
+litellm_settings:
+  # Backstop across every key, in USD per budget_duration. Per-group caps are
+  # set on the teams by keys.py; this only bounds what a bug there could cost.
+  max_budget: 1000
+  budget_duration: 30d
+  drop_params: true
