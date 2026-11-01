@@ -686,9 +686,24 @@ access to `var/gpulease.db`.
 
 The host needs the `BedrockInvokeCourseModels` statement from
 `iam-policy.json` on its role (re-apply the policy as in Install, step 2), and
-roughly 1 GB of free RAM and 2 GB of disk beyond what gpu-lease uses: a
-t3.medium with a 20 GB root, not the t3.small the gpu-lease install alone
-needs.
+roughly 600 MB of RAM and 2 GB of disk beyond what gpu-lease uses. The course
+host runs it on the t3.small with the root grown to 20 GB and a 2 GB swapfile
+as headroom; without swap, ~650 MB is left free at idle and an OOM kill takes
+out whichever service it picks.
+
+**Each model needs its AWS Marketplace agreement accepted once per account.**
+Bedrock subscribes the account on a model's first use, and that needs
+`aws-marketplace:Subscribe`, which the host role does not have and a university
+account's org policy may deny even to administrators. Until it is accepted,
+calls fail with "not authorized to perform the required AWS Marketplace
+actions" (sometimes after a few that succeed). Check before handing out keys:
+
+```bash
+for m in haiku-5-5 sonnet-5-5 opus-5-5; do
+  aws bedrock get-foundation-model-availability --region us-west-2 \
+    --model-id anthropic.claude-$m --query agreementAvailability.status --output text
+done      # every line should say AVAILABLE
+```
 
 ```bash
 cd ~/cs378 && git pull

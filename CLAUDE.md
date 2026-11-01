@@ -445,8 +445,15 @@ nothing in `gpulease/` should import from or know about it.
   `[proxy]` alone starts and then dies on a missing `prisma` module. The unit
   puts the venv on `PATH` because the startup migrations call the prisma CLI.
 
+- **A model also needs its AWS Marketplace agreement accepted** once per
+  account (`aws bedrock get-foundation-model-availability ...
+  agreementAvailability` = `AVAILABLE`). The host role cannot subscribe and
+  should not be given `aws-marketplace:*` to make it; a 403 mentioning
+  "required AWS Marketplace actions" is this, not `iam-policy.json`.
+
 The lease host's public IP is auto-assigned, not an Elastic IP: a stop/start
-changes it and DuckDNS has to be repointed by hand.
+changes it and DuckDNS has to be repointed by hand. It is a t3.small with a
+20 GB root and a 2 GB swapfile (`/etc/fstab`) so gpu-lease and LiteLLM fit.
 
 ## Data model
 
