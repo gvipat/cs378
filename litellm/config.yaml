@@ -38,16 +38,6 @@ model_list:
       cache_read_input_token_cost: 1.0e-7
       cache_creation_input_token_cost: 2.5e-6
 
-  - model_name: global.anthropic.claude-opus-5-5
-    litellm_params:
-      model: bedrock/global.anthropic.claude-opus-5-5
-      aws_region_name: us-west-2
-    model_info:
-      input_cost_per_token: 4.0e-6
-      output_cost_per_token: 2.0e-5
-      cache_read_input_token_cost: 2.0e-7
-      cache_creation_input_token_cost: 5.0e-6
-
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
   database_url: os.environ/DATABASE_URL

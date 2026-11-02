@@ -699,7 +699,7 @@ calls fail with "not authorized to perform the required AWS Marketplace
 actions" (sometimes after a few that succeed). Check before handing out keys:
 
 ```bash
-for m in haiku-5-5 sonnet-5-5 opus-5-5; do
+for m in haiku-5-5 sonnet-5-5; do
   aws bedrock get-foundation-model-availability --region us-west-2 \
     --model-id anthropic.claude-$m --query agreementAvailability.status --output text
 done      # every line should say AVAILABLE
@@ -742,8 +742,8 @@ export AGENTKV_LLM_KEY=sk-...                    # from llm-tokens.csv
 export AGENTKV_BEDROCK_MODEL=global.anthropic.claude-sonnet-5-5
 ```
 
-Model ids are the Bedrock inference-profile ids: `global.anthropic.claude-haiku-5-5`,
-`global.anthropic.claude-sonnet-5-5`, `global.anthropic.claude-opus-5-5`. Any
+Model ids are the Bedrock inference-profile ids: `global.anthropic.claude-haiku-5-5`
+and `global.anthropic.claude-sonnet-5-5`. Any
 OpenAI-compatible client works with base URL `$AGENTKV_LLM_URL/v1` and the key.
 A student checks their group's spend with:
 
