@@ -676,8 +676,9 @@ access to `var/gpulease.db`.
   models in `litellm/config.yaml`.
 - **Each group is a LiteLLM team with a USD cap.** Members' keys draw on the
   shared team budget; once it is spent, every request from that group is
-  refused until you raise it. It can overshoot by roughly one in-flight
-  request per key.
+  refused until you raise it. Spend takes up to about a minute to record, so it
+  can overshoot by what the group's keys send in that time, not just what is in
+  flight.
 - **Only the student paths are reachable.** `llm.utcs378-infra.duckdns.org`
   forwards only chat completions, completions, embeddings, the model list and
   `/key/info`; the admin API, UI and every other LiteLLM route 404. You manage keys on the host, or over `ssh -L 4000:localhost:4000`.
@@ -687,7 +688,7 @@ access to `var/gpulease.db`.
 The host needs the `BedrockInvokeCourseModels` statement from
 `iam-policy.json` on its role (re-apply the policy as in Install, step 2), and
 roughly 600 MB of RAM and 2 GB of disk beyond what gpu-lease uses. The course
-host runs it on the t3.small with the root grown to 20 GB and a 2 GB swapfile
+host runs it on a t3.medium with two workers, the root grown to 20 GB and a 2 GB swapfile
 as headroom; without swap, ~650 MB is left free at idle and an OOM kill takes
 out whichever service it picks.
 

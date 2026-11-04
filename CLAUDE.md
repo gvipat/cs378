@@ -56,7 +56,7 @@ var/gpulease.db the whole system state
 
 ## Deployment shape
 
-One EC2 "lease host" (`t3.small`, Ubuntu) runs the service under systemd as the
+One EC2 "lease host" (`t3.medium` with the LLM proxy, Ubuntu) runs the service under systemd as the
 `ubuntu` user, out of the repo directory. It carries an instance profile built
 from `iam-policy.json`; that role is the only AWS credential anywhere in the
 system. The student instances it launches carry **no** instance profile.
@@ -463,8 +463,9 @@ nothing in `gpulease/` should import from or know about it.
   "required AWS Marketplace actions" is this, not `iam-policy.json`.
 
 The lease host's public IP is auto-assigned, not an Elastic IP: a stop/start
-changes it and DuckDNS has to be repointed by hand. It is a t3.small with a
-20 GB root and a 2 GB swapfile (`/etc/fstab`) so gpu-lease and LiteLLM fit.
+changes it and DuckDNS has to be repointed by hand. It is a t3.medium with a
+20 GB root and a 2 GB swapfile (`/etc/fstab`) so gpu-lease and two LiteLLM
+workers fit.
 
 ## Data model
 

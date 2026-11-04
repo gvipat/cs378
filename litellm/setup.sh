@@ -92,7 +92,7 @@ Environment=PATH=${DIR}/.venv/bin:/usr/local/bin:/usr/bin:/bin
 Environment=DISABLE_ADMIN_UI=True
 # Localhost only: Caddy terminates TLS in front and forwards the student paths.
 ExecStart=${DIR}/.venv/bin/litellm --config ${DIR}/config.yaml \\
-    --host 127.0.0.1 --port 4000 --num_workers 1
+    --host 127.0.0.1 --port 4000 --num_workers 2
 Restart=always
 RestartSec=5
 
@@ -119,6 +119,8 @@ cat > "$UNIT.d/hardening.conf" <<UNITEOF
 InaccessiblePaths=-$REPO/var -$REPO/gpulease.env -$REPO/gpulease.env.a1 -$REPO/gpulease.env.a2
 InaccessiblePaths=-$REPO/tokens.csv -$REPO/new-tokens.csv -$REPO/tokens-fix.csv -$REPO/tokens-sent.log
 InaccessiblePaths=-$REPO/llm-tokens.csv -$REPO/roster.csv -$REPO/new-roster.csv -$USER_HOME/.ssh
+# If it runs away, it restarts rather than taking gpu-lease down with the host.
+MemoryMax=2500M
 CapabilityBoundingSet=
 PrivateDevices=true
 ProtectKernelModules=true
