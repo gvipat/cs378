@@ -732,7 +732,7 @@ replacement salt key makes what LiteLLM has stored in the database unreadable.
 ### Keys and budgets
 
 ```bash
-./litellm/keys.py mint roster.csv --budget 50        # $50 per group, total
+./litellm/keys.py mint roster.csv                    # $50 per group, total
 ./litellm/keys.py mint roster.csv --budget 10 --duration 7d   # or $10 a week
 ./litellm/keys.py show                               # spend and cap per group
 ./litellm/keys.py budget 7 --usd 80                  # change group 7's cap
@@ -742,9 +742,11 @@ replacement salt key makes what LiteLLM has stored in the database unreadable.
 
 `mint` behaves like `admin.py roster`: it writes `llm-tokens.csv` (0600) with
 only the keys it just issued, re-running it skips students who already have
-one, and LiteLLM keeps only a hash, so that file is the only copy. `--budget`
-applies to groups that do not have a team yet; use `budget` to change an
-existing one. Defaults per key: 120 requests/minute, 16 concurrent.
+one, and LiteLLM keeps only a hash, so that file is the only copy. Each group's
+budget is $50 unless `--budget` says otherwise. Either way it applies only to
+groups that do not have a team yet; use `budget` to change an existing one.
+A team's model list is fixed when it is created, so re-run `mint` after adding a
+model: it updates existing teams and leaves their keys and budgets alone. Defaults per key: 120 requests/minute, 16 concurrent.
 
 ### What students set
 

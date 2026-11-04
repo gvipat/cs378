@@ -127,7 +127,7 @@ for _ in $(seq 1 60); do
   Listening on 127.0.0.1:4000 only. Next:
     1. Caddy: the llm.* site in Caddyfile.example -> /etc/caddy/Caddyfile,
        then sudo systemctl reload caddy
-    2. ./litellm/keys.py mint --budget <USD per group>   # -> llm-tokens.csv
+    2. ./litellm/keys.py mint roster.csv   # \$50 per group -> llm-tokens.csv
 EOF
     exit 0
   fi

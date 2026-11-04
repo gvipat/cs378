@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """LLM proxy keys: one LiteLLM team per group, one key per student.
 
-    ./litellm/keys.py mint roster.csv --budget 50      # -> llm-tokens.csv
+    ./litellm/keys.py mint roster.csv                  # $50 per group -> llm-tokens.csv
     ./litellm/keys.py mint roster.csv --rotate         # reissue existing keys
     ./litellm/keys.py show                             # spend per group
     ./litellm/keys.py budget 7 --usd 80                # change group 7's cap
@@ -26,6 +26,7 @@ import urllib.request
 
 _DIR = pathlib.Path(__file__).resolve().parent
 URL = os.environ.get("LITELLM_URL", "http://127.0.0.1:4000").rstrip("/")
+DEFAULT_BUDGET_USD = 50.0
 
 
 def _master_key():
@@ -99,7 +100,8 @@ def cmd_mint(args):
 
     Like admin.py roster: llm-tokens.csv is the only copy of the keys LiteLLM
     hands back (it stores a hash), existing students keep theirs unless you pass
-    --rotate, and the file is rewritten with only what this run issued.
+    --rotate, and the file is rewritten with only what this run issued. Existing
+    teams keep their budgets but get config.yaml's current model list.
     """
     with open(args.roster, newline="") as f:
         rows = list(csv.DictReader(f))
@@ -109,9 +111,14 @@ def cmd_mint(args):
 
     models = _models()
     teams = teams_by_alias()
-    need = {team_alias(str(r["group_id"]).strip()) for r in rows} - set(teams)
-    if need and args.budget is None:
-        sys.exit(f"{len(need)} group(s) have no team yet; pass --budget USD for their cap")
+    roster_teams = {team_alias(str(r["group_id"]).strip()) for r in rows}
+    need = roster_teams - set(teams)
+    # A team's model list is fixed at creation, so a model added to config.yaml
+    # is refused for existing groups until their list is brought up to date.
+    for alias in sorted(roster_teams - need):
+        if sorted(teams[alias].get("models") or []) != sorted(models):
+            api("POST", "/team/update", {"team_id": teams[alias]["team_id"], "models": models})
+            print(f"  updated {alias}: {len(models)} models")
     for alias in sorted(need):
         body = {"team_alias": alias, "max_budget": args.budget, "models": models}
         if args.duration:
@@ -206,7 +213,8 @@ if __name__ == "__main__":
 
     p = sub.add_parser("mint", help="create teams and keys from a roster")
     p.add_argument("roster")
-    p.add_argument("--budget", type=float, help="USD cap for each NEW group's team")
+    p.add_argument("--budget", type=float, default=DEFAULT_BUDGET_USD,
+                   help="USD cap for each NEW group's team (default: %(default)g)")
     p.add_argument("--duration", help="reset the cap every period, e.g. 30d (default: never)")
     p.add_argument("--rpm", type=int, default=120, help="requests/minute per key")
     p.add_argument("--parallel", type=int, default=16, help="concurrent requests per key")
