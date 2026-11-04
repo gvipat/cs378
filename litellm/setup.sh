@@ -109,6 +109,26 @@ UMask=0077
 WantedBy=multi-user.target
 UNITEOF
 
+# It faces the internet and runs as the same user as gpu-lease, so hide what
+# gpu-lease keeps: students' tokens and session SSH keys.
+REPO="$(dirname "$DIR")"
+USER_HOME="$(getent passwd "$RUN_USER" | cut -d: -f6)"
+mkdir -p "$UNIT.d"
+cat > "$UNIT.d/hardening.conf" <<UNITEOF
+[Service]
+InaccessiblePaths=-$REPO/var -$REPO/gpulease.env -$REPO/gpulease.env.a1 -$REPO/gpulease.env.a2
+InaccessiblePaths=-$REPO/tokens.csv -$REPO/new-tokens.csv -$REPO/tokens-fix.csv -$REPO/tokens-sent.log
+InaccessiblePaths=-$REPO/llm-tokens.csv -$REPO/roster.csv -$REPO/new-roster.csv -$USER_HOME/.ssh
+CapabilityBoundingSet=
+PrivateDevices=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+SystemCallArchitectures=native
+UNITEOF
+
 systemctl daemon-reload
 systemctl enable --quiet litellm
 systemctl restart litellm

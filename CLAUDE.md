@@ -435,9 +435,13 @@ nothing in `gpulease/` should import from or know about it.
 - **Budgets are per group**: one team per `group_id` (`group-<id>`), the cap on
   the team, student keys under it with no cap of their own. `keys.py` is the
   only tool that creates or changes them.
-- **Caddy forwards only student paths** to it (`/v1/*` and a few aliases). The
-  admin API, the UI and the provider pass-through routes 404 from outside; do
-  not widen that to a blocklist.
+- **Caddy forwards only named student paths** to it, not `/v1/*`, which also
+  reaches LiteLLM's files, batches, agents and model-info routes. The admin
+  API, the UI and the provider pass-through routes 404 from outside; do not
+  widen that to a blocklist.
+- **`litellm.service` cannot read gpu-lease's state.** It runs as the same user,
+  so `setup.sh` writes a drop-in with `InaccessiblePaths` over the database,
+  tokens, rosters, `gpulease.env` and `~/.ssh`. Add new secret files to it.
 - **`litellm.env` is created once and never regenerated.** A new
   `LITELLM_SALT_KEY` makes everything LiteLLM encrypted in its database
   unreadable.

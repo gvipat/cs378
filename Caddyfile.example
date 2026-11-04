@@ -26,6 +26,8 @@
 # the whole problem, unmoved.
 
 utcs378-infra.duckdns.org {
+	@apidocs path /docs /docs/* /redoc /openapi.json
+	respond @apidocs 404
 	reverse_proxy 127.0.0.1:8000
 }
 
@@ -33,10 +35,11 @@ utcs378-infra.duckdns.org {
 # this needs no DNS record of its own. Only the paths a student's client calls
 # are forwarded: the admin API, the UI, and the provider pass-through routes
 # all 404 here, so a leaked master key is useless from outside. Admin work goes
-# over `ssh -L 4000:localhost:4000`. If a student's framework 404s on a path
-# that is not admin, add it to @student.
+# over `ssh -L 4000:localhost:4000`. Name each path rather than /v1/*, which
+# also reaches LiteLLM's files, batches, agents and model-info routes. If a
+# student's framework 404s on a path that is not admin, add it to @student.
 llm.utcs378-infra.duckdns.org {
-	@student path /v1/* /chat/completions /completions /embeddings /models /key/info /health/readiness
+	@student path /v1/chat/completions /chat/completions /v1/completions /completions /v1/embeddings /embeddings /v1/models /models /key/info /health/readiness
 	handle @student {
 		reverse_proxy 127.0.0.1:4000
 	}

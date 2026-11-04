@@ -679,8 +679,8 @@ access to `var/gpulease.db`.
   refused until you raise it. It can overshoot by roughly one in-flight
   request per key.
 - **Only the student paths are reachable.** `llm.utcs378-infra.duckdns.org`
-  forwards `/v1/*` and a few OpenAI-compatible aliases; the admin API and UI
-  404. You manage keys on the host, or over `ssh -L 4000:localhost:4000`.
+  forwards only chat completions, completions, embeddings, the model list and
+  `/key/info`; the admin API, UI and every other LiteLLM route 404. You manage keys on the host, or over `ssh -L 4000:localhost:4000`.
 
 ### Install
 
@@ -751,10 +751,11 @@ model: it updates existing teams and leaves their keys and budgets alone. Defaul
 ### What students set
 
 ```bash
-export AGENTKV_LLM_URL=https://llm.utcs378-infra.duckdns.org
-export AGENTKV_LLM_KEY=sk-...                    # from llm-tokens.csv
-export AGENTKV_BEDROCK_MODEL=global.anthropic.claude-sonnet-5-5
+(umask 077; echo 'sk-...' > ~/.agentkv_llm_key)    # one line of llm-tokens.csv
 ```
+
+The assignment's code reads that file and defaults to the proxy's URL. Part 1
+runs offline and needs no key.
 
 Model ids are the Bedrock inference-profile ids. USD per million tokens:
 
@@ -767,11 +768,13 @@ Model ids are the Bedrock inference-profile ids. USD per million tokens:
 | `global.openai.gpt-6.1-sol` | 2.00 | 10.00 |
 | `global.openai.gpt-6-luna` | 0.10 | 0.50 |
 
-Any OpenAI-compatible client works with base URL `$AGENTKV_LLM_URL/v1` and the
-key. A student checks their group's spend with:
+Any OpenAI-compatible client works with base URL
+`https://llm.utcs378-infra.duckdns.org/v1` and the key. A student checks their
+own key's spend with the command below. It does not show the group's total or
+cap, which `keys.py show` does.
 
 ```bash
-curl -s $AGENTKV_LLM_URL/key/info -H "Authorization: Bearer $AGENTKV_LLM_KEY"
+curl -s https://llm.utcs378-infra.duckdns.org/key/info -H "Authorization: Bearer $(cat ~/.agentkv_llm_key)" | python3 -c 'import json,sys; print("$%.2f" % json.load(sys.stdin)["info"]["spend"])'
 ```
 
 ### Prices
