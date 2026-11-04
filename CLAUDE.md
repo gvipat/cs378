@@ -432,6 +432,9 @@ nothing in `gpulease/` should import from or know about it.
   LiteLLM's cost map does not know is billed at $0 and no budget ever trips.
   The pinned release predates the current models, so do not delete the
   `model_info` blocks as redundant.
+- **Every model drops `service_tier`** (`additional_drop_params`). LiteLLM
+  records the standard price for a faster tier, so allowing one lets a group
+  spend past its cap. A new model needs the same line.
 - **Budgets are per group**: one team per `group_id` (`group-<id>`), the cap on
   the team, student keys under it with no cap of their own. `keys.py` is the
   only tool that creates or changes them.

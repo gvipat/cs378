@@ -786,12 +786,12 @@ means no budget ever trips. If you add a model, add its prices, make one call,
 and check that `keys.py show` moved.
 
 The Price List has no rows for the OpenAI models, so their prices come from the
-Bedrock model cards. Two rates on those models cost more than the table above,
-and both are billed against the group's budget:
+Bedrock model cards. A request over 272K input tokens bills at the long-context
+rate for the whole request, and that is charged to the group's budget.
 
-- A request over 272K input tokens bills at the long-context rate for the whole
-  request: double on input, 1.5x on output.
-- `service_tier: "ultrafast"` on `gpt-6.1-sol` costs 6x standard.
+The proxy strips `service_tier` from every request. `ultrafast` on `gpt-6.1-sol`
+costs 6x standard on Bedrock, but LiteLLM records the standard price, so a group
+could otherwise spend past its cap without its budget noticing.
 
 The OpenAI models reach Bedrock through its Chat Completions API, which also
 requires `bedrock:InvokeModel` on `project/default`. That is why
