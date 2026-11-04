@@ -673,7 +673,7 @@ access to `var/gpulease.db`.
 
 - **Students hold LiteLLM virtual keys** (`sk-...`), never AWS credentials. The
   proxy calls Bedrock with the host's instance role, which may invoke only the
-  three models in `litellm/config.yaml`.
+  models in `litellm/config.yaml`.
 - **Each group is a LiteLLM team with a USD cap.** Members' keys draw on the
   shared team budget; once it is spent, every request from that group is
   refused until you raise it. It can overshoot by roughly one in-flight
@@ -699,10 +699,22 @@ calls fail with "not authorized to perform the required AWS Marketplace
 actions" (sometimes after a few that succeed). Check before handing out keys:
 
 ```bash
-for m in haiku-5-5 sonnet-5-5; do
+for m in anthropic.claude-haiku-5-5 anthropic.claude-sonnet-5-5 anthropic.claude-opus-5-5 \
+         openai.gpt-6.1-terra openai.gpt-6.1-sol openai.gpt-6-luna; do
   aws bedrock get-foundation-model-availability --region us-west-2 \
-    --model-id anthropic.claude-$m --query agreementAvailability.status --output text
+    --model-id $m --query agreementAvailability.status --output text
 done      # every line should say AVAILABLE
+```
+
+A model showing `NOT_AVAILABLE` can be accepted from an account allowed to
+subscribe, instead of waiting for a first use:
+
+```bash
+m=openai.gpt-6.1-terra
+token=$(aws bedrock list-foundation-model-agreement-offers --region us-west-2 \
+  --model-id $m --query 'offers[0].offerToken' --output text)
+aws bedrock create-foundation-model-agreement --region us-west-2 \
+  --model-id $m --offer-token "$token"
 ```
 
 ```bash
@@ -742,10 +754,19 @@ export AGENTKV_LLM_KEY=sk-...                    # from llm-tokens.csv
 export AGENTKV_BEDROCK_MODEL=global.anthropic.claude-sonnet-5-5
 ```
 
-Model ids are the Bedrock inference-profile ids: `global.anthropic.claude-haiku-5-5`
-and `global.anthropic.claude-sonnet-5-5`. Any
-OpenAI-compatible client works with base URL `$AGENTKV_LLM_URL/v1` and the key.
-A student checks their group's spend with:
+Model ids are the Bedrock inference-profile ids. USD per million tokens:
+
+| Model id | Input | Output |
+| --- | --- | --- |
+| `global.anthropic.claude-haiku-5-5` | 0.10 | 0.50 |
+| `global.anthropic.claude-sonnet-5-5` | 2.00 | 10.00 |
+| `global.anthropic.claude-opus-5-5` | 4.00 | 20.00 |
+| `global.openai.gpt-6.1-terra` | 1.00 | 5.00 |
+| `global.openai.gpt-6.1-sol` | 2.00 | 10.00 |
+| `global.openai.gpt-6-luna` | 0.10 | 0.50 |
+
+Any OpenAI-compatible client works with base URL `$AGENTKV_LLM_URL/v1` and the
+key. A student checks their group's spend with:
 
 ```bash
 curl -s $AGENTKV_LLM_URL/key/info -H "Authorization: Bearer $AGENTKV_LLM_KEY"
@@ -758,6 +779,18 @@ set from the AWS Price List rather than LiteLLM's cost map: the pinned release
 predates these models, and a model it cannot price is recorded at $0, which
 means no budget ever trips. If you add a model, add its prices, make one call,
 and check that `keys.py show` moved.
+
+The Price List has no rows for the OpenAI models, so their prices come from the
+Bedrock model cards. Two rates on those models cost more than the table above,
+and both are billed against the group's budget:
+
+- A request over 272K input tokens bills at the long-context rate for the whole
+  request: double on input, 1.5x on output.
+- `service_tier: "ultrafast"` on `gpt-6.1-sol` costs 6x standard.
+
+The OpenAI models reach Bedrock through its Chat Completions API, which also
+requires `bedrock:InvokeModel` on `project/default`. That is why
+`BedrockInvokeCourseModels` lists that resource; do not remove it as stray.
 
 ### The host's address
 

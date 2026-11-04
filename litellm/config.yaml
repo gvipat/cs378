@@ -9,8 +9,9 @@
 # release predates these models, and a model the map does not know is billed at
 # $0 -- which means no budget ever trips. Figures are Bedrock us-west-2, global
 # cross-region profiles (10% cheaper than us.*), from the AWS Price List,
-# 2026-10-31. If you add a model, add its prices, then check /key/info shows
-# nonzero spend after one call.
+# 2026-10-31. The Price List has no rows for the OpenAI models here, so theirs
+# are from the Bedrock model cards, 2026-11-04. If you add a model, add its
+# prices, then check /key/info shows nonzero spend after one call.
 
 model_list:
   - model_name: global.anthropic.claude-haiku-5-5
@@ -37,6 +38,60 @@ model_list:
       output_cost_per_token: 1.0e-5
       cache_read_input_token_cost: 1.0e-7
       cache_creation_input_token_cost: 2.5e-6
+
+  - model_name: global.anthropic.claude-opus-5-5
+    litellm_params:
+      model: bedrock/global.anthropic.claude-opus-5-5
+      aws_region_name: us-west-2
+    model_info:
+      input_cost_per_token: 4.0e-6
+      output_cost_per_token: 2.0e-5
+      cache_read_input_token_cost: 2.0e-7
+      cache_creation_input_token_cost: 5.0e-6
+
+  # OpenAI models: a request over 272K input tokens bills at the long-context
+  # rate for the whole request.
+  - model_name: global.openai.gpt-6.1-terra
+    litellm_params:
+      model: bedrock/global.openai.gpt-6.1-terra
+      aws_region_name: us-west-2
+    model_info:
+      input_cost_per_token: 1.0e-6
+      output_cost_per_token: 5.0e-6
+      cache_read_input_token_cost: 5.0e-8
+      cache_creation_input_token_cost: 1.25e-6
+      input_cost_per_token_above_272k_tokens: 2.0e-6
+      output_cost_per_token_above_272k_tokens: 7.5e-6
+      cache_read_input_token_cost_above_272k_tokens: 1.0e-7
+      cache_creation_input_token_cost_above_272k_tokens: 2.5e-6
+
+  - model_name: global.openai.gpt-6.1-sol
+    litellm_params:
+      model: bedrock/global.openai.gpt-6.1-sol
+      aws_region_name: us-west-2
+    model_info:
+      input_cost_per_token: 2.0e-6
+      output_cost_per_token: 1.0e-5
+      cache_read_input_token_cost: 1.0e-7
+      cache_creation_input_token_cost: 2.5e-6
+      input_cost_per_token_above_272k_tokens: 4.0e-6
+      output_cost_per_token_above_272k_tokens: 1.5e-5
+      cache_read_input_token_cost_above_272k_tokens: 2.0e-7
+      cache_creation_input_token_cost_above_272k_tokens: 5.0e-6
+
+  - model_name: global.openai.gpt-6-luna
+    litellm_params:
+      model: bedrock/global.openai.gpt-6-luna
+      aws_region_name: us-west-2
+    model_info:
+      input_cost_per_token: 1.0e-7
+      output_cost_per_token: 5.0e-7
+      cache_read_input_token_cost: 1.0e-8
+      cache_creation_input_token_cost: 1.25e-7
+      input_cost_per_token_above_272k_tokens: 2.0e-7
+      output_cost_per_token_above_272k_tokens: 7.5e-7
+      cache_read_input_token_cost_above_272k_tokens: 2.0e-8
+      cache_creation_input_token_cost_above_272k_tokens: 2.5e-7
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
