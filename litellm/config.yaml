@@ -101,6 +101,6 @@ litellm_settings:
   callbacks: request_guard.guard
   # Backstop across every key, in USD per budget_duration. Per-group caps are
   # set on the teams by keys.py; this only bounds what a bug there could cost.
-  max_budget: 1000
+  max_budget: 1500
   budget_duration: 30d
   drop_params: true
