@@ -436,6 +436,9 @@ nothing in `gpulease/` should import from or know about it.
   LiteLLM records the standard price for Bedrock's faster service tiers, so one
   reaching Bedrock lets a group spend past its cap, and `extra_body` and a
   request's own `additional_drop_params` both get round dropping `service_tier`.
+  It must keep `metadata`, where LiteLLM tracks spend. After changing it, make a
+  call and check `keys.py show` moved, because a mistake here disables budgets
+  while every request still succeeds.
 - **Budgets are per group**: one team per `group_id` (`group-<id>`), the cap on
   the team, student keys under it with no cap of their own. `keys.py` is the
   only tool that creates or changes them.

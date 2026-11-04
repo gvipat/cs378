@@ -17,11 +17,15 @@ ALLOWED = {
     "input", "encoding_format", "dimensions",               # embeddings
 }
 
+# LiteLLM adds this to the body it hands this hook, and keeps the key and team
+# that spend is charged to in it. Dropping it silently turns budgets off.
+INTERNAL = {"metadata", "litellm_metadata"}
+
 
 class RequestGuard(CustomLogger):
     async def async_pre_call_hook(self, user_api_key_dict, cache, data, call_type):
         sent = data.get("proxy_server_request", {}).get("body") or {}
-        for field in set(sent) - ALLOWED:
+        for field in set(sent) - ALLOWED - INTERNAL:
             data.pop(field, None)
         return data
 
