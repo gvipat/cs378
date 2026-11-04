@@ -789,9 +789,11 @@ The Price List has no rows for the OpenAI models, so their prices come from the
 Bedrock model cards. A request over 272K input tokens bills at the long-context
 rate for the whole request, and that is charged to the group's budget.
 
-The proxy strips `service_tier` from every request. `ultrafast` on `gpt-6.1-sol`
-costs 6x standard on Bedrock, but LiteLLM records the standard price, so a group
-could otherwise spend past its cap without its budget noticing.
+`litellm/request_guard.py` drops any request field not on its allowlist. Without
+it, `service_tier: "ultrafast"` on `gpt-6.1-sol` costs 6x standard on Bedrock
+while LiteLLM records the standard price, so a group could spend past its cap
+without its budget noticing. A framework that needs another harmless field gets
+it added there.
 
 The OpenAI models reach Bedrock through its Chat Completions API, which also
 requires `bedrock:InvokeModel` on `project/default`. That is why
