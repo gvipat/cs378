@@ -741,13 +741,27 @@ replacement salt key makes what LiteLLM has stored in the database unreadable.
 ./litellm/keys.py mint roster.csv --rotate           # reissue everyone's key
 ```
 
+Mail each student their key, one message each, then delete `llm-tokens.csv`:
+
+```bash
+./litellm/mail_keys.py llm-tokens.csv --roster roster.csv                  # dry run, keys hidden
+./litellm/mail_keys.py llm-tokens.csv --to you@utexas.edu --limit 1 --send --from you@utexas.edu
+./litellm/mail_keys.py llm-tokens.csv --roster roster.csv --send --from you@utexas.edu
+```
+
+Sent students go in `llm-keys-sent.log`, so a re-run skips them. To reissue one
+student's key, mint from a roster holding only their row with `--rotate`, then
+mail that file with `--resend`.
+
 `mint` behaves like `admin.py roster`: it writes `llm-tokens.csv` (0600) with
 only the keys it just issued, re-running it skips students who already have
 one, and LiteLLM keeps only a hash, so that file is the only copy. Each group's
 budget is $50 unless `--budget` says otherwise. Either way it applies only to
 groups that do not have a team yet; use `budget` to change an existing one.
 A team's model list is fixed when it is created, so re-run `mint` after adding a
-model: it updates existing teams and leaves their keys and budgets alone. Defaults per key: 120 requests/minute, 16 concurrent.
+model: it updates existing teams and leaves their keys and budgets alone.
+Defaults per key: 120 requests/minute and 16 concurrent, counted by each
+LiteLLM worker, so with two workers a key gets up to about twice that.
 
 ### What students set
 

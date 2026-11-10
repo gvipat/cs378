@@ -34,3 +34,4 @@ roster.csv
 
 # who has already been mailed a token (student EIDs)
 tokens-sent.log
+llm-keys-sent.log

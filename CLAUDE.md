@@ -42,7 +42,8 @@ iam-policy.json permissions for the lease host
 Caddyfile.example the TLS terminator in front of the API and the LLM proxy;
                 copy to /etc/caddy
 litellm/        the LLM proxy (see "LLM proxy" below): config.yaml, setup.sh,
-                keys.py, request_guard.py; litellm.env is generated, 0600, gitignored
+                keys.py, mail_keys.py, request_guard.py; litellm.env is generated, 0600,
+                gitignored
 gpulease.env    local, gitignored; gpulease.env.example is the template
 gpulease.env.test  t3.micro + minutes, for the manual checklist. Selected with
                 GPULEASE_ENV=gpulease.env.test, which REPLACES gpulease.env
@@ -131,6 +132,7 @@ sudo ./litellm/setup.sh             # install or re-install
 journalctl -u litellm -f
 ./litellm/keys.py mint roster.csv --budget 50   # teams + keys -> llm-tokens.csv
 ./litellm/keys.py show              # spend per group
+./litellm/mail_keys.py llm-tokens.csv --roster roster.csv   # dry run; --send --from to mail
 
 # CLI
 GPULEASE_API=https://host python3 cli/gpulease.py login <token> | start | status | stop
