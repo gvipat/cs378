@@ -87,9 +87,9 @@ WorkingDirectory=${DIR}
 EnvironmentFile=${ENV_FILE}
 # The startup migrations shell out to the prisma CLI in the venv.
 Environment=PATH=${DIR}/.venv/bin:/usr/local/bin:/usr/bin:/bin
-# Keys are managed with keys.py; nothing needs the admin UI's login, and Caddy
-# does not route to /ui anyway.
-Environment=DISABLE_ADMIN_UI=True
+# The admin UI is on, but Caddy does not route /ui, so it is reachable only
+# over an SSH tunnel to 127.0.0.1:4000. Log in as admin with the master key.
+Environment=DISABLE_ADMIN_UI=False
 # Localhost only: Caddy terminates TLS in front and forwards the student paths.
 ExecStart=${DIR}/.venv/bin/litellm --config ${DIR}/config.yaml \\
     --host 127.0.0.1 --port 4000 --num_workers 2

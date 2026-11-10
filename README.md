@@ -682,6 +682,11 @@ access to `var/gpulease.db`.
 - **Only the student paths are reachable.** `llm.utcs378-infra.duckdns.org`
   forwards only chat completions, completions, embeddings, the model list and
   `/key/info`; the admin API, UI and every other LiteLLM route 404. You manage keys on the host, or over `ssh -L 4000:localhost:4000`.
+- **The admin dashboard is reachable only through that tunnel.** Run
+  `ssh -i ~/.ssh/gpu-lease.pem -L 4000:localhost:4000 ubuntu@<host>`, open
+  `http://localhost:4000/ui`, and log in as `admin` with `LITELLM_MASTER_KEY`
+  from `litellm/litellm.env`. Change budgets with `keys.py`, not the dashboard,
+  so `keys.py` stays the one place they are set.
 
 ### Install
 
