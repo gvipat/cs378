@@ -753,6 +753,9 @@ Sent students go in `llm-keys-sent.log`, so a re-run skips them. To reissue one
 student's key, mint from a roster holding only their row with `--rotate`, then
 mail that file with `--resend`.
 
+The roster can be Canvas's export as-is: its `user_id` and `group_name` columns
+are read as `student_id` and `group_id`.
+
 `mint` behaves like `admin.py roster`: it writes `llm-tokens.csv` (0600) with
 only the keys it just issued, re-running it skips students who already have
 one, and LiteLLM keeps only a hash, so that file is the only copy. Each group's

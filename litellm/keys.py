@@ -27,6 +27,8 @@ import urllib.request
 _DIR = pathlib.Path(__file__).resolve().parent
 URL = os.environ.get("LITELLM_URL", "http://127.0.0.1:4000").rstrip("/")
 DEFAULT_BUDGET_USD = 50.0
+# Canvas exports name the columns user_id and group_name.
+ROSTER_ALIASES = {"user_id": "student_id", "group_name": "group_id"}
 
 
 def _master_key():
@@ -95,6 +97,17 @@ def key_for(student_id):
     return keys[0]
 
 
+def read_roster(path):
+    """Rows of a roster CSV, with Canvas's column names mapped to ours."""
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        rows = [{ROSTER_ALIASES.get(k, k): v for k, v in r.items()} for r in csv.DictReader(f)]
+    missing = {"student_id", "group_id"} - set(rows[0] if rows else ())
+    if missing:
+        sys.exit(f"{path} is missing columns: {sorted(missing)} "
+                 f"(or Canvas's {sorted(k for k, v in ROSTER_ALIASES.items() if v in missing)})")
+    return rows
+
+
 def cmd_mint(args):
     """Create any missing teams and keys from the roster.
 
@@ -103,11 +116,7 @@ def cmd_mint(args):
     --rotate, and the file is rewritten with only what this run issued. Existing
     teams keep their budgets but get config.yaml's current model list.
     """
-    with open(args.roster, newline="") as f:
-        rows = list(csv.DictReader(f))
-    missing = {"student_id", "group_id"} - set(rows[0].keys() if rows else [])
-    if missing:
-        sys.exit(f"roster is missing columns: {sorted(missing)}")
+    rows = read_roster(args.roster)
 
     models = _models()
     teams = teams_by_alias()

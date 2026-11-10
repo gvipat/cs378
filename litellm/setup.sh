@@ -118,7 +118,7 @@ cat > "$UNIT.d/hardening.conf" <<UNITEOF
 [Service]
 InaccessiblePaths=-$REPO/var -$REPO/gpulease.env -$REPO/gpulease.env.a1 -$REPO/gpulease.env.a2
 InaccessiblePaths=-$REPO/tokens.csv -$REPO/new-tokens.csv -$REPO/tokens-fix.csv -$REPO/tokens-sent.log
-InaccessiblePaths=-$REPO/llm-tokens.csv -$REPO/roster.csv -$REPO/new-roster.csv -$USER_HOME/.ssh
+InaccessiblePaths=-$REPO/llm-tokens.csv -$REPO/roster.csv -$REPO/new-roster.csv -$REPO/new-new-roster.csv -$USER_HOME/.ssh
 # If it runs away, it restarts rather than taking gpu-lease down with the host.
 MemoryMax=2500M
 CapabilityBoundingSet=

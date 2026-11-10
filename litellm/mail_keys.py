@@ -32,6 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from mail_tokens import (  # noqa: E402
     DEFAULT_DOMAIN, address, already_sent, die, read_csv, record, wrong_domain_warning)
+from keys import read_roster  # noqa: E402  (accepts Canvas's column names too)
 
 SUBJECT = "{course} Assignment 4 LLM key"
 
@@ -69,7 +70,7 @@ def collect(path, roster_path=None):
     } for r in read_csv(path, {"student_id", "key"})]
     if not roster_path:
         return rows, [], []
-    listed = {r["student_id"].strip() for r in read_csv(roster_path, {"student_id", "group_id"})}
+    listed = {r["student_id"].strip() for r in read_roster(roster_path)}
     have = {r["student_id"] for r in rows}
     return [r for r in rows if r["student_id"] in listed], sorted(listed - have), sorted(have - listed)
 
