@@ -47,8 +47,8 @@ Assignment 4 is out.
   webpage     {page_url}
   code        {repo_url}
 
-You can use the key below to call LLMs for Part 3 by following the Model
-access section of the assignment README.
+You can use the key below for API access to a selection of LLMs for Part 3 by
+following the Model access section of the assignment README.
 This key is yours alone - do not share it with anyone, and never put it in a
 notebook or a committed file. Your group's keys share a ${budget} budget, and
 requests are refused once it is spent.
