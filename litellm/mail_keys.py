@@ -34,6 +34,9 @@ from mail_tokens import (  # noqa: E402
     DEFAULT_DOMAIN, address, already_sent, die, read_csv, record, wrong_domain_warning)
 from keys import read_roster  # noqa: E402  (accepts Canvas's column names too)
 
+DEFAULT_PAGE = "https://utcs378.github.io/fall26/assignments/assignment4"
+DEFAULT_REPO = "https://github.com/utcs378/assignment4-template"
+
 SUBJECT = "{course} Assignment 4 LLM key"
 
 BODY = """\
@@ -104,8 +107,8 @@ def main():
     ap.add_argument("--reply-to")
     ap.add_argument("--course", default="CS 378")
     ap.add_argument("--budget", default="50", help="USD per group, as quoted in the mail (default 50)")
-    ap.add_argument("--page-url", help="assignment webpage to link, if any")
-    ap.add_argument("--repo-url", help="assignment repository to link, if any")
+    ap.add_argument("--page-url", default=DEFAULT_PAGE, help=f"assignment webpage (default {DEFAULT_PAGE})")
+    ap.add_argument("--repo-url", default=DEFAULT_REPO, help=f"template students start from (default {DEFAULT_REPO})")
     ap.add_argument("--domain", default=DEFAULT_DOMAIN,
                     help=f"student addresses are <student_id>@DOMAIN (default {DEFAULT_DOMAIN})")
     ap.add_argument("--to", metavar="ADDRESS",
