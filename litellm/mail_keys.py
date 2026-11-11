@@ -42,7 +42,7 @@ SUBJECT = "{course} assignment4 key"
 BODY = """\
 Hi {name},
 
-assignment4 is out.
+Assignment 4 is out.
 
   webpage     {page_url}
   code        {repo_url}
@@ -55,10 +55,6 @@ requests are refused once it is spent.
 
   key         {key}
   group       {group}
-
-Save it once:
-
-  (umask 077; echo '{key}' > ~/.agentkv_llm_key)
 
 {signature}
 """
