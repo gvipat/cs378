@@ -37,12 +37,21 @@ from keys import read_roster  # noqa: E402  (accepts Canvas's column names too)
 DEFAULT_PAGE = "https://utcs378.github.io/fall26/assignments/assignment4"
 DEFAULT_REPO = "https://github.com/utcs378/assignment4-template"
 
-SUBJECT = "{course} Assignment 4 LLM key"
+SUBJECT = "{course} assignment4 key"
 
 BODY = """\
 Hi {name},
 
-Your key for the course LLM proxy (Assignment 4, Part 3):
+assignment4 is out.
+
+  webpage     {page_url}
+  code        {repo_url}
+
+You can use the key below to call LLMs for Part 3 by following the Model
+access section of the assignment README.
+This key is yours alone - do not share it with anyone, and never put it in a
+notebook or a committed file. Your group's keys share a ${budget} budget, and
+requests are refused once it is spent.
 
   key         {key}
   group       {group}
@@ -50,13 +59,6 @@ Your key for the course LLM proxy (Assignment 4, Part 3):
 Save it once:
 
   (umask 077; echo '{key}' > ~/.agentkv_llm_key)
-
-The assignment README's Model access section lists the models and how to check
-your usage. Your group's keys share a ${budget} budget; requests are refused
-once it is spent.
-{links}
-This key is yours alone - do not share it, and never put it in a notebook or a
-committed file.
 
 {signature}
 """
@@ -89,11 +91,9 @@ def build(row, args):
     msg["To"] = args.to or address(row, args.domain)
     if args.reply_to:
         msg["Reply-To"] = args.reply_to
-    links = "".join(f"\n  {label:<11} {url}" for label, url in
-                    (("webpage", args.page_url), ("code", args.repo_url)) if url)
     msg.set_content(BODY.format(
         name=row["name"], key=row["key"], group=row["group_id"], budget=args.budget,
-        links=links + "\n" if links else "", signature=args.signature))
+        page_url=args.page_url, repo_url=args.repo_url, signature=args.signature))
     return msg
 
 
